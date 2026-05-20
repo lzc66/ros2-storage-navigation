@@ -1,0 +1,38 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 50
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    mecanum_controller:
+      type: mecanum_drive_controller/MecanumDriveController
+
+    lift_controller:
+      type: position_controllers/JointGroupPositionController
+
+# --- Mecanum Drive Controller ---
+mecanum_controller:
+  ros__parameters:
+    wheels_per_side: 2
+    wheel_separation: 0.271
+    wheel_radius: 0.07162
+    wheel_base: 0.24
+    front_left_wheel_joint: front_left_wheel_joint
+    front_right_wheel_joint: front_right_wheel_joint
+    rear_left_wheel_joint: rear_left_wheel_joint
+    rear_right_wheel_joint: rear_right_wheel_joint
+    base_frame_id: base_footprint
+    odom_frame_id: odom
+    enable_odom_tf: true
+    publish_odom: true
+    publish_rate: 50.0
+    cmd_vel_timeout: 0.5
+    use_stamped_vel: false
+
+# --- Lift Position Controller ---
+lift_controller:
+  ros__parameters:
+    joints:
+      - lift_joint
+    interface_name: position

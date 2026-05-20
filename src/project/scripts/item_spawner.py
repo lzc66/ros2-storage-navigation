@@ -5,6 +5,10 @@ from rclpy.node import Node
 from gazebo_msgs.srv import SpawnEntity
 from project.srv import SpawnItem
 
+# Anti-explosion: spawn items slightly above target Z to avoid mesh overlap,
+# relying on gravity to settle them onto the shelf surface below.
+Z_CLEARANCE = 0.05  # meters
+
 
 class GazeboClient(Node):
     """Separate node running in its own thread for calling Gazebo services."""
@@ -57,14 +61,17 @@ class ItemSpawner(Node):
         name = f'{target_type}_{self.count}'
         sdf = self._make_sdf(name, target_type)
 
-        ok = self._gazebo_client.spawn(name, sdf, x, y, z)
+        # Apply Z-clearance: spawn above shelf surface, let gravity settle.
+        # Prevents physics explosion from collision-mesh overlap on multi-level shelves.
+        safe_z = z + Z_CLEARANCE
+        ok = self._gazebo_client.spawn(name, sdf, x, y, safe_z)
 
         if ok:
             self.get_logger().info(
                 f'Spawned [{target_type}] {name} at ({x:.1f}, {y:.1f}, {z:.1f})'
             )
             response.success = True
-            response.message = f'Spawned {target_type} at ({x:.1f}, {y:.1f}, {z:.1f})'
+            response.message = f'Spawned {target_type} at ({x:.1f}, {y:.1f}, {z:.1f}) [clearance Z={safe_z:.2f}]'
         else:
             self.get_logger().error(f'Failed to spawn {name}')
             response.success = False

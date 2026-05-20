@@ -1,15 +1,21 @@
 <robot xmlns:xacro="http://ros.org/wiki/xacro">
-  <xacro:macro name="imu">
+  <xacro:macro name="imu" params="parent_link:=base_link *origin">
     <link name="imu_link"/>
-    
-    <joint name="imu_to_base_link" type="fixed">
-      <parent link="base_link"/>
+
+    <joint name="imu_joint" type="fixed">
+      <parent link="${parent_link}"/>
       <child link="imu_link"/>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <xacro:insert_block name="origin" />
     </joint>
   
     <gazebo>
-      <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu">
+      <plugin filename="libgazebo_ros_imu_sensor.so"
+              name="gazebo_ros_imu_sensor">
+        <ros>
+          <namespace>/</namespace>
+          <remapping>~/out:=imu/data</remapping>
+        </ros>
+        <initial_orientation_as_reference>false</initial_orientation_as_reference>
       </plugin>
     </gazebo>
 
