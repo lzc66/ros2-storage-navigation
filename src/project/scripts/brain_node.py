@@ -8,9 +8,9 @@ Architecture:
   - Nav2 → Lift → Active Search → Approach → Grip → Retreat → Drop-off
   - Async gripper service client (/gripper/switch)
 """
-import asyncio
 import math
 import queue
+import threading
 import time
 
 import rclpy
@@ -200,25 +200,21 @@ class BrainNode(Node):
             f'{request.target_z:.1f})  queue_size={self._task_queue.qsize()}'
         )
 
-        # Async wait: task completion event or cancel request
-        task['_done_event'] = asyncio.Event()
+        # Polling-based wait: check _task_done flag set by _succeed_task / _fail_task
+        task['_task_done'] = False
+        task['_result_ok'] = False
+        task['_result_msg'] = ''
         result = FetchTask.Result()
         while rclpy.ok():
             if goal_handle.is_cancel_requested:
                 result.success = False
-                result.message = 'Cancelled'
+                result.message = 'Cancelled by client'
                 goal_handle.canceled()
                 return result
-            # Wait for _succeed_task or _fail_task to signal completion
-            try:
-                done, _ = await asyncio.wait(
-                    [asyncio.ensure_future(task['_done_event'].wait())],
-                    timeout=0.5,
-                )
-                if done:
-                    break
-            except Exception:
+            # Non-blocking poll: _succeed_task/_fail_task flip _task_done to True
+            if task.get('_task_done'):
                 break
+            time.sleep(0.1)  # MultiThreadedExecutor — safe to sleep here
         result.success = task.get('_result_ok', False)
         result.message = task.get('_result_msg', 'Unknown')
         if result.success:
@@ -403,15 +399,17 @@ class BrainNode(Node):
             if on_done:
                 on_done(True)
         elif status == 6:  # CANCELED
-            self.get_logger().info(
-                '[NAV] Previous goal was canceled (preemption confirmed)'
-            )
-            # Do NOT call on_done — the preempt path is handling dispatch
-        else:
-            self.get_logger().warn(f'[NAV] Failed (status={status})')
-            if not self._preempting:
-                if on_done:
-                    on_done(False)
+            self.get_logger().error('[NAV] Goal canceled — aborting task pipeline')
+            self._nav_busy = False
+            self._active_task = None
+            if on_done and not self._preempting:
+                on_done(False)
+        else:  # ABORTED (5), UNKNOWN (0), or other failures
+            self.get_logger().error(f'[NAV] Failed (status={status}) — aborting pipeline')
+            self._nav_busy = False
+            self._active_task = None
+            if on_done and not self._preempting:
+                on_done(False)
 
     def _on_nav_done(self, ok, prio, seq, task):
         """Navigation complete → lift to target Z."""
@@ -520,14 +518,12 @@ class BrainNode(Node):
         self._active_task = None
         task['_result_ok'] = True
         task['_result_msg'] = 'Pick-and-place complete'
+        task['_task_done'] = True  # unblock _execute_fetch polling loop
         handle = task.get('handle')
         if handle and handle.is_active:
             fb = FetchTask.Feedback()
             fb.current_state = 'DONE'
             handle.publish_feedback(fb)
-        # Signal the async execute callback
-        if task.get('_done_event'):
-            task['_done_event'].set()
         self.get_logger().info('[TASK] SUCCESS — full pick-and-place complete')
 
     def _fail_task(self, task, reason):
@@ -535,9 +531,7 @@ class BrainNode(Node):
         self._active_task = None
         task['_result_ok'] = False
         task['_result_msg'] = reason
-        # Signal the async execute callback
-        if task.get('_done_event'):
-            task['_done_event'].set()
+        task['_task_done'] = True  # unblock _execute_fetch polling loop
         self.get_logger().error(f'[TASK] FAILED: {reason}')
 
     # ============================================================
