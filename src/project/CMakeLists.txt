@@ -45,6 +45,7 @@ install(PROGRAMS
   scripts/calibration_check.py
   scripts/task_emitter.py
   scripts/stress_test_preemption.py
+  scripts/e2e_pick_place_test.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
