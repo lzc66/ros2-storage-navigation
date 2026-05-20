@@ -34,7 +34,7 @@ SPAWN_X, SPAWN_Y, SPAWN_Z = 1.5, 0.0, 0.5
 TARGET_YAW       = 0.0
 DROP_X, DROP_Y   = -1.0, -1.0
 DROP_YAW         = 0.0
-GRASP_Z_MIN      = 0.15   # box must rise above this to prove lifted
+GRASP_RISE_MIN   = 0.08   # box must rise at least this much from initial Z
 DELIVERY_EPS     = 0.5    # tolerance radius around drop point
 GROUND_Z_MAX     = 0.2    # box must fall below this to prove released
 MAX_WALL_TIME    = 120.0  # overall timeout (seconds)
@@ -49,13 +49,14 @@ class E2ETestNode(Node):
         # Trajectory log
         self._trajectory = []          # [(x, y, z, t), ...]
         self._grasp_detected = False
-        self._grasp_time = None
+        self._grasp_rise = 0.0         # max rise from initial Z
+        self._initial_z = None         # first recorded Z
         self._final_pos = None
         self._start_time = time.time()
 
         # Model states subscription (omniscient audit)
         self._states_sub = self.create_subscription(
-            ModelStates, '/gazebo/model_states', self._states_cb, 10,
+            ModelStates, '/model_states', self._states_cb, 10,
             callback_group=self._cbg,
         )
 
@@ -89,8 +90,15 @@ class E2ETestNode(Node):
             self._trajectory.append((x, y, z, t))
             self._final_pos = (x, y, z)
 
-            # Detect grasp: Z rises above threshold
-            if not self._grasp_detected and z > GRASP_Z_MIN:
+            # Track initial Z (first sighting after spawn)
+            if self._initial_z is None:
+                self._initial_z = z
+
+            # Detect grasp: Z rises significantly above initial (post-fall) level
+            rise = z - (self._initial_z or 0.0)
+            if rise > self._grasp_rise:
+                self._grasp_rise = rise
+            if not self._grasp_detected and rise > GRASP_RISE_MIN:
                 self._grasp_detected = True
                 self._grasp_time = t
 
@@ -148,6 +156,10 @@ class E2ETestNode(Node):
             self.get_logger().error('[E2E AUDIT] Task rejected')
             return
         self.get_logger().info('[E2E AUDIT] Task accepted. Monitoring physics...')
+        # Fallback: run assertions after MAX_WALL_TIME regardless of task callback
+        self._fallback_timer = self.create_timer(
+            MAX_WALL_TIME, self._run_assertions, callback_group=self._cbg,
+        )
         handle.get_result_async().add_done_callback(self._task_done_cb)
 
     def _task_done_cb(self, future):
@@ -179,22 +191,22 @@ class E2ETestNode(Node):
 
         # Assertion 1: Grasp — box elevated above shelf
         if grasp_detected:
-            # Find peak Z
-            peak_z = max(p[2] for p in traj)
+            peak_z = max(p[2] for p in traj) if traj else 0.0
             self.get_logger().info(
                 f'[E2E AUDIT] Phase 2 (Grasp): PASS | '
-                f'Box elevated to Z={peak_z:.2f}'
+                f'Box rose {self._grasp_rise:.2f}m (peak Z={peak_z:.2f})'
             )
         else:
-            peak_z = max(p[2] for p in traj) if traj else SPAWN_Z
+            peak_z = max(p[2] for p in traj) if traj else 0.0
             self.get_logger().error(
                 f'[E2E AUDIT] Phase 2 (Grasp): FAIL | '
-                f'Box never rose above Z={GRASP_Z_MIN} (peak={peak_z:.2f})'
+                f'Max rise={self._grasp_rise:.3f}m < {GRASP_RISE_MIN}m '
+                f'(peak={peak_z:.2f}, initial={self._initial_z})'
             )
             all_pass = False
 
         # Assertion 2: Delivery — box near drop point
-        if final_pos:
+        if final_pos and len(traj) > 2:
             fx, fy, fz = final_pos
             dist = math.sqrt((fx - DROP_X)**2 + (fy - DROP_Y)**2)
             if dist <= DELIVERY_EPS:
@@ -211,7 +223,8 @@ class E2ETestNode(Node):
                 all_pass = False
         else:
             self.get_logger().error(
-                '[E2E AUDIT] Phase 3 (Drop): FAIL | No trajectory records'
+                f'[E2E AUDIT] Phase 3 (Drop): FAIL | '
+                f'Trajectory records={len(traj)}, final_pos_set={final_pos is not None}'
             )
             all_pass = False
 
