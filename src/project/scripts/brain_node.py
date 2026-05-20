@@ -1,19 +1,17 @@
 #!/usr/bin/python3
 """
-Embodied AI Brain: Multi-color sort + self-healing + ESCAPE escape.
+Embodied AI Brain: World-coordinate target tracking + sort + self-healing.
 
 States: EXPLORE -> LOCK -> GRAB -> RETURN -> DROP -> ESCAPE -> EXPLORE
 
-Stage 6 Fixes:
-  - ESCAPE: 180deg turn after DROP to prevent infinite re-grab of cargo
-  - K_RATIO_DIST: resolution-independent distance calibration constant
-  - Vision callback blocked during ESCAPE state
+Campaign 2: Receives world-frame (Xw, Yw, Zw) directly from 3D vision_node.
+No camera projection needed — target position is already in map frame.
 """
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from nav2_msgs.action import NavigateToPose
-from geometry_msgs.msg import Point, PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, Twist
 import math, random, time
 
 SPAWN_X, SPAWN_Y = -2.0, -0.5
@@ -25,18 +23,13 @@ PATROL_POINTS = [
     (0.0, 1.8), (2.0, 0.0), (-1.5, 1.5), (0.5, -1.8)
 ]
 
-CAM_FOV = 1.089
-K_RATIO_DIST = 1.8   # distance = K_RATIO_DIST / sqrt(ratio)  (meters)
-
-CAPTURE_RATIO = 0.12
-CENTER_THRESHOLD = 0.08
-APPROACH_MARGIN = 0.45
+APPROACH_OFFSET = 0.50   # stop this far from target
 GOAL_FILTER_EPS = 0.2
 GOAL_UPDATE_PERIOD = 2.0
 GRAB_DURATION = 3.0
 DROP_DURATION = 3.0
-ESCAPE_DURATION = 3.0    # seconds for 180deg turn
-ESCAPE_ANGULAR = 1.0     # rad/s (pi rad in ~3.14s)
+ESCAPE_DURATION = 3.0
+ESCAPE_ANGULAR = 1.0
 VISION_TIMEOUT = 5.0
 
 
@@ -55,13 +48,14 @@ class BrainNode(Node):
         self.nav_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
         self._goal_handle = None
 
-        self.create_subscription(Point, '/target_object', self.vision_cb, 10)
+        # Campaign 2: PointStamped with world coords + type code in z
+        self.create_subscription(PointStamped, '/target_object', self.vision_cb, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.amcl_cb, 10)
 
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         self._rx = 0.0; self._ry = 0.0; self._ryaw = 0.0
-        self._target_err_norm = 0.0; self._target_ratio = 0.0
+        self._target_x = 0.0; self._target_y = 0.0
         self._target_type = 0.0; self._target_seen = False
         self._last_vision_t = 0.0
 
@@ -74,7 +68,7 @@ class BrainNode(Node):
         self._heal_zone = RED_DROP_ZONE
         self._last_tx = None; self._last_ty = None
 
-        self.get_logger().info('Brain ready. EXPLORE (ESCAPE + Dynamic Obstacle)')
+        self.get_logger().info('Brain ready (Campaign 2: world-coord vision). EXPLORE.')
         self._start_explore()
 
     # ============ Callbacks ============
@@ -84,36 +78,22 @@ class BrainNode(Node):
         self._ryaw = quat_to_yaw(msg.pose.pose.orientation)
 
     def vision_cb(self, msg):
-        # Stage 6: ESCAPE blocks vision triggers to prevent re-grab
         if self.state == 'ESCAPE':
             return
-        self._target_err_norm = msg.x
-        self._target_ratio = msg.y
-        self._target_type = msg.z
+        # Campaign 2: PointStamped — world coords in point field
+        self._target_x = msg.point.x
+        self._target_y = msg.point.y
+        self._target_type = msg.point.z   # 1.0=red, 2.0=blue
         self._target_seen = True
         self._last_vision_t = time.time()
-        if self.state == 'EXPLORE' and self._target_ratio > 0.002:
+        if self.state == 'EXPLORE':
             self._enter_lock()
-
-    # ============ Camera Projection (Stage 6: K_RATIO_DIST) ============
-    def _project_target(self):
-        err = self._target_err_norm
-        ratio = self._target_ratio
-        theta = -(err) * (CAM_FOV / 2.0)
-        if ratio < 0.001:
-            raw_dist = 8.0
-        else:
-            raw_dist = K_RATIO_DIST / math.sqrt(ratio)
-        safe_dist = max(0.2, raw_dist - APPROACH_MARGIN)
-        tx = self._rx + safe_dist * math.cos(self._ryaw + theta)
-        ty = self._ry + safe_dist * math.sin(self._ryaw + theta)
-        return tx, ty, raw_dist, safe_dist, theta
 
     # ============ EXPLORE ============
     def _start_explore(self):
         self._target_seen = False
-        self._target_err_norm = 0.0
-        self._target_ratio = 0.0
+        self._target_x = 0.0
+        self._target_y = 0.0
         self._target_type = 0.0
         self._last_tx = None; self._last_ty = None
         self._lock_timer = None
@@ -129,7 +109,9 @@ class BrainNode(Node):
             return
         self.state = 'LOCK'
         cname = 'RED' if self._target_type < 1.5 else 'BLUE/BRN'
-        self.get_logger().info(f'[LOCK] {cname} target detected! Tracking...')
+        self.get_logger().info(
+            f'[LOCK] {cname} target at world ({self._target_x:.2f},{self._target_y:.2f})!'
+        )
         if self._goal_handle is not None:
             self._goal_handle.cancel_goal_async()
             self._goal_handle = None
@@ -144,22 +126,25 @@ class BrainNode(Node):
             self._lock_timer.cancel()
             self._start_explore()
             return
-        err = self._target_err_norm
-        ratio = self._target_ratio
-        if ratio > CAPTURE_RATIO and abs(err) < CENTER_THRESHOLD:
+
+        tx, ty = self._target_x, self._target_y
+        dist = math.sqrt((tx - self._rx)**2 + (ty - self._ry)**2)
+
+        # If close enough, grab
+        if dist < APPROACH_OFFSET:
             cname = 'RED' if self._target_type < 1.5 else 'BLUE/BRN'
-            self.get_logger().info(f'[TARGET ACQUIRED] {cname} ratio={ratio:.3f}')
+            self.get_logger().info(f'[TARGET ACQUIRED] {cname} dist={dist:.2f}m')
             self._lock_timer.cancel()
             self._enter_grab()
             return
-        tx, ty, raw_dist, safe_dist, theta = self._project_target()
+
+        # Filter duplicate goal updates
         if self._last_tx is not None:
-            if math.sqrt((tx-self._last_tx)**2 + (ty-self._last_ty)**2) < GOAL_FILTER_EPS:
+            if math.sqrt((tx - self._last_tx)**2 + (ty - self._last_ty)**2) < GOAL_FILTER_EPS:
                 return
         self._last_tx = tx; self._last_ty = ty
         self.get_logger().info(
-            f'[LOCK] err={err:.3f} r={ratio:.4f} rdist={raw_dist:.2f}m '
-            f'sdist={safe_dist:.2f}m -> ({tx:.2f},{ty:.2f})'
+            f'[LOCK] target=({tx:.2f},{ty:.2f}) dist={dist:.2f}m'
         )
         self._send_nav_goal(tx, ty)
 
@@ -168,7 +153,6 @@ class BrainNode(Node):
         self.state = 'GRAB'
         cname = 'RED' if self._target_type < 1.5 else 'BLUE/BRN'
         self.get_logger().info(f'[GRAB] Loading {cname} cargo... (3s)')
-        # Stage 7: Kill Nav2 ghost pedal before stopping
         if self._goal_handle is not None:
             self._goal_handle.cancel_goal_async()
             self._goal_handle = None
@@ -206,12 +190,11 @@ class BrainNode(Node):
         self.get_logger().info('[DROP] Done! Starting ESCAPE turn...')
         self._start_escape()
 
-    # ============ ESCAPE (Stage 6.5: continuous twist @10Hz) ============
+    # ============ ESCAPE ============
     def _start_escape(self):
         self.state = 'ESCAPE'
-        self.get_logger().info(f'[ESCAPE] Turning 180deg for {ESCAPE_DURATION}s (10Hz burst)...')
+        self.get_logger().info(f'[ESCAPE] Turning 180deg for {ESCAPE_DURATION}s...')
         self._escape_start_time = time.time()
-        # High-frequency timer to defeat velocity_smoother 1s timeout
         self._escape_timer = self.create_timer(0.1, self._publish_escape_twist)
         self._escape_done_timer = self.create_timer(ESCAPE_DURATION, self._escape_done)
 
@@ -232,7 +215,7 @@ class BrainNode(Node):
             self._escape_timer.cancel()
             self._escape_timer = None
         self._stop_robot()
-        self.get_logger().info('[ESCAPE] Turn complete! FOV cleared. Restarting EXPLORE.')
+        self.get_logger().info('[ESCAPE] Turn complete! Restarting EXPLORE.')
         self._start_explore()
 
     # ============ Helpers ============
@@ -261,7 +244,7 @@ class BrainNode(Node):
     def _nav_result_cb(self, future):
         result = future.result()
         status = result.status if result else -1
-        if status == 4:  # SUCCEEDED
+        if status == 4:
             if self.state == 'EXPLORE':
                 self.get_logger().info('[EXPLORE] Waypoint reached, next...')
                 self._start_explore()

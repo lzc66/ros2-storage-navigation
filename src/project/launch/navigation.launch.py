@@ -10,19 +10,25 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('project')
+    aws_share = get_package_share_directory('aws_robomaker_small_warehouse_world')
 
     # Model paths
+    aws_model_path = os.path.join(aws_share, 'models')
     model_path = os.path.join(pkg_share, 'models')
     sys_model_path = os.path.expanduser('~/.gazebo/models')
     tb3_model_path = '/opt/ros/humble/share/turtlebot3_gazebo/models'
     env_model_path = os.environ.get('GAZEBO_MODEL_PATH', '')
-    full_model_path = f'{model_path}:{sys_model_path}:{tb3_model_path}'
+    full_model_path = (
+        f'{model_path}:{aws_model_path}:{sys_model_path}:{tb3_model_path}'
+    )
     if env_model_path:
         full_model_path += f':{env_model_path}'
 
     set_model_path = SetEnvironmentVariable('GAZEBO_MODEL_PATH', full_model_path)
 
-    world_file = os.path.join(pkg_share, 'worlds', 'turtlebot3_world.world')
+    # AWS RoboMaker Small Warehouse (no roof)
+    world_file = os.path.join(aws_share, 'worlds', 'no_roof_small_warehouse',
+                              'no_roof_small_warehouse.world')
     map_file = os.path.join(pkg_share, 'maps', 'map.yaml')
     nav2_params = os.path.join(pkg_share, 'params', 'nav2_params.yaml')
 
