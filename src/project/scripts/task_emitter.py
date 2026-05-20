@@ -17,18 +17,18 @@ from project.action import FetchTask
 
 
 class TaskEmitter(Node):
-    def __init__(self, priority, x, y, z, wait):
+    def __init__(self, priority, x, y, z, yaw, wait):
         super().__init__('task_emitter')
         self._client = ActionClient(self, FetchTask, 'fetch_task')
         self._priority = priority
-        self._x = x; self._y = y; self._z = z
+        self._x = x; self._y = y; self._z = z; self._yaw = yaw
         self._wait = wait
         self._done = False
 
     def send(self):
         self.get_logger().info(
             f'Sending task P{self._priority} → '
-            f'({self._x:.1f},{self._y:.1f},{self._z:.1f})'
+            f'({self._x:.1f},{self._y:.1f},{self._z:.1f}) yaw={self._yaw:.2f}'
         )
         if not self._client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error('Action server /fetch_task not available')
@@ -40,6 +40,7 @@ class TaskEmitter(Node):
         goal.target_x = self._x
         goal.target_y = self._y
         goal.target_z = self._z
+        goal.target_yaw = self._yaw
 
         send_future = self._client.send_goal_async(
             goal, feedback_callback=self._feedback_cb,
@@ -83,11 +84,13 @@ def main():
                         help='target Y (world)')
     parser.add_argument('--z', type=float, default=0.8,
                         help='target Z (lift height)')
+    parser.add_argument('--yaw', type=float, default=0.0,
+                        help='target yaw in rad (0=+X, 1.57=+Y, 3.14=-X)')
     parser.add_argument('--wait', action='store_true',
                         help='wait for task completion before exit')
     args = parser.parse_args()
 
-    node = TaskEmitter(args.priority, args.x, args.y, args.z, args.wait)
+    node = TaskEmitter(args.priority, args.x, args.y, args.z, args.yaw, args.wait)
     node.send()
 
     if args.wait:

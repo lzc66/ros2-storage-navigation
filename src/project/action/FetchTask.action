@@ -3,6 +3,7 @@ int32 priority
 float64 target_x
 float64 target_y
 float64 target_z
+float64 target_yaw   # desired body heading at arrival (rad, 0=+X, 1.57=+Y)
 ---
 bool success
 string message

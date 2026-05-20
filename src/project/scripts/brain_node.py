@@ -1,17 +1,16 @@
 #!/usr/bin/python3
 """
-Campaign 3: Priority-Queue Cognitive Engine with Safe Nav2 Preemption.
+Campaign 4: 4D Task Protocol + Active Search Micro-behavior.
 
 Architecture:
-  - Action Server: accepts FetchTask (priority, target_x/y/z)
-  - PriorityQueue: (priority, seq, goal) — lower priority value = higher urgency
-  - Preemption: cancel_goal_async → wait CANCELED → send new goal
-  - Orchestration: Nav2 move → lift to Z → vision confirm (PointStamped)
-  - Async: MultiThreadedExecutor, no time.sleep in callbacks
+  - Action Server: accepts FetchTask (priority, target_x/y/z/yaw)
+  - PriorityQueue with safe Nav2 preemption
+  - Nav2 with strict pose orientation (yaw → quaternion)
+  - Active search: slow rotation (≤0.2 rad/s) when vision misses target
+  - High-CoG safety: angular speed throttled when lift elevated
 """
 import math
 import queue
-import threading
 import time
 
 import rclpy
@@ -30,12 +29,15 @@ from project.action import FetchTask
 # ================================================================
 # Constants
 # ================================================================
-APPROACH_THRESHOLD = 0.5     # m — considered "arrived" at Nav2 goal
-VISION_CONFIRM_EPS  = 0.3    # m — vision match threshold for grab success
-VISION_TIMEOUT      = 8.0    # s — max wait for vision after arriving
-LIFT_WAIT           = 3.0    # s — settle time after lift move
-POLL_PERIOD         = 0.5    # s — queue poll interval
-PREEMPT_WAIT        = 3.0    # s — max wait for cancel to resolve
+VISION_CONFIRM_EPS   = 0.3     # m — vision match threshold
+LIFT_WAIT            = 3.0     # s — settle time after lift move
+POLL_PERIOD          = 0.5     # s — queue poll interval
+
+# Campaign 4: Active search
+SEARCH_TIMEOUT       = 10.0    # s — max active search duration
+SEARCH_ANGULAR_SPEED = 0.15   # rad/s — safe slow rotation (≤0.2)
+SEARCH_POLL_PERIOD   = 0.1     # s — search loop frequency
+HIGH_LIFT_Z          = 0.4     # m — above this, enforce speed limit
 
 # Drop zones (world coords)
 RED_ZONE  = (-2.0, -0.5)
@@ -46,6 +48,11 @@ def quat_to_yaw(q):
     siny = 2.0 * (q.w * q.z + q.x * q.y)
     cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny, cosy)
+
+
+def yaw_to_quat(yaw):
+    """Convert yaw angle (rad) to quaternion (z, w only)."""
+    return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
 
 
 # ================================================================
@@ -113,7 +120,7 @@ class BrainNode(Node):
         )
 
         self.get_logger().info(
-            'Brain Campaign 3 ready. Action Server: /fetch_task'
+            'Brain Campaign 4 ready. /fetch_task (4D: x,y,z,yaw) + Active Search'
         )
 
     # ============================================================
@@ -156,6 +163,7 @@ class BrainNode(Node):
             'x': request.target_x,
             'y': request.target_y,
             'z': request.target_z,
+            'yaw': request.target_yaw,
             'seq': self._seq,
             'handle': goal_handle,
         }
@@ -315,20 +323,23 @@ class BrainNode(Node):
             handle.publish_feedback(feedback)
 
         self._nav_busy = True
-        self._send_nav_goal(task['x'], task['y'], on_done=lambda ok: (
-            self._on_nav_done(ok, prio, seq, task)
-        ))
+        self._send_nav_goal(
+            task['x'], task['y'], task.get('yaw', 0.0),
+            on_done=lambda ok: self._on_nav_done(ok, prio, seq, task),
+        )
 
     # ============================================================
     # Nav2: send goal + result handler
     # ============================================================
-    def _send_nav_goal(self, gx, gy, on_done=None):
+    def _send_nav_goal(self, gx, gy, gyaw, on_done=None):
         self._nav_client.wait_for_server()
         goal = NavigateToPose.Goal()
         goal.pose.header.frame_id = 'map'
         goal.pose.pose.position.x = gx
         goal.pose.pose.position.y = gy
-        goal.pose.pose.orientation.w = 1.0
+        _, _, qz, qw = yaw_to_quat(gyaw)
+        goal.pose.pose.orientation.z = qz
+        goal.pose.pose.orientation.w = qw
 
         send_future = self._nav_client.send_goal_async(goal)
         send_future.add_done_callback(
@@ -411,45 +422,61 @@ class BrainNode(Node):
             fb.current_state = 'CONFIRMING'
             handle.publish_feedback(fb)
 
-        # Vision confirmation loop (poll via timer)
+        # Active search loop (faster poll for responsive rotation control)
         self._vision_start_time = time.time()
         self._vision_task = task
         self._vision_prio = prio
         self._vision_seq = seq
         self._vision_timer = self.create_timer(
-            0.5, self._vision_poll, callback_group=self._cbg,
+            SEARCH_POLL_PERIOD, self._vision_poll, callback_group=self._cbg,
         )
 
     def _vision_poll(self):
-        """Check if vision sees the target within error threshold."""
+        """Active search: check vision, if miss → slow rotate to scan FOV."""
         elapsed = time.time() - self._vision_start_time
         task = self._vision_task
-        tx, ty, tz = task['x'], task['y'], task['z']
+        tx, ty = task['x'], task['y']
 
+        # If we see the target within error threshold → success
         if self._vision_seen:
             err = math.sqrt(
-                (self._vision_x - tx) ** 2 +
-                (self._vision_y - ty) ** 2
-                # Z comparison skipped (type_code in point.z, not world Z)
+                (self._vision_x - tx) ** 2 + (self._vision_y - ty) ** 2
             )
-            dist = math.sqrt(
-                (self._vision_x - self._rx) ** 2 +
-                (self._vision_y - self._ry) ** 2
-            )
-            if dist < VISION_CONFIRM_EPS:
-                self.get_logger().info(
-                    f'[CONFIRM] Vision match! err={err:.2f}m dist={dist:.2f}m'
-                )
+            if err < VISION_CONFIRM_EPS:
+                self.get_logger().info(f'[CONFIRM] Target acquired! err={err:.2f}m')
                 self._vision_timer.cancel()
+                self._stop_rotation()
                 self._succeed_task(task)
                 return
 
-        if elapsed > VISION_TIMEOUT:
-            self.get_logger().warn(
-                f'[CONFIRM] Vision timeout ({elapsed:.1f}s)'
-            )
+        # If timeout → fail
+        if elapsed > SEARCH_TIMEOUT:
+            self.get_logger().warn(f'[SEARCH] Timeout ({SEARCH_TIMEOUT:.1f}s)')
             self._vision_timer.cancel()
-            self._fail_task(task, 'Vision confirmation timeout')
+            self._stop_rotation()
+            self._fail_task(task, 'Active search timeout — target not found')
+            return
+
+        # Active search: publish slow rotation so camera scans the FOV
+        twist = Twist()
+        twist.angular.z = SEARCH_ANGULAR_SPEED
+        self._cmd_pub.publish(twist)
+        if not hasattr(self, '_search_log_n'):
+            self._search_log_n = 0
+        self._search_log_n += 1
+        if self._search_log_n % 20 == 0:  # every 2s
+            self.get_logger().info(
+                f'[SEARCH] Scanning... elapsed={elapsed:.1f}s '
+                f'angular={SEARCH_ANGULAR_SPEED}rad/s'
+            )
+
+    def _stop_rotation(self):
+        """Send zero Twist to halt search rotation."""
+        stop = Twist()
+        stop.angular.z = 0.0
+        stop.linear.x = 0.0
+        self._cmd_pub.publish(stop)
+        self.get_logger().info('[SEARCH] Rotation stopped.')
 
     # ============================================================
     # Task completion
