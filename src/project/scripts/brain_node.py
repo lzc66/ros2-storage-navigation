@@ -1,36 +1,45 @@
 #!/usr/bin/python3
 """
-Embodied AI Brain: World-coordinate target tracking + sort + self-healing.
+Campaign 3: Priority-Queue Cognitive Engine with Safe Nav2 Preemption.
 
-States: EXPLORE -> LOCK -> GRAB -> RETURN -> DROP -> ESCAPE -> EXPLORE
-
-Campaign 2: Receives world-frame (Xw, Yw, Zw) directly from 3D vision_node.
-No camera projection needed — target position is already in map frame.
+Architecture:
+  - Action Server: accepts FetchTask (priority, target_x/y/z)
+  - PriorityQueue: (priority, seq, goal) — lower priority value = higher urgency
+  - Preemption: cancel_goal_async → wait CANCELED → send new goal
+  - Orchestration: Nav2 move → lift to Z → vision confirm (PointStamped)
+  - Async: MultiThreadedExecutor, no time.sleep in callbacks
 """
+import math
+import queue
+import threading
+import time
+
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionClient
+from rclpy.action import ActionServer, ActionClient, GoalResponse, CancelResponse
+from rclpy.action.server import ServerGoalHandle
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, Twist
-import math, random, time
+from std_msgs.msg import Float64MultiArray
 
-SPAWN_X, SPAWN_Y = -2.0, -0.5
-RED_DROP_ZONE = (-2.0, -0.5)
-BLUE_DROP_ZONE = (-2.0, 1.5)
+from project.action import FetchTask
 
-PATROL_POINTS = [
-    (1.5, -0.5), (1.0, 0.5), (1.5, 0.5), (1.5, 1.5),
-    (0.0, 1.8), (2.0, 0.0), (-1.5, 1.5), (0.5, -1.8)
-]
+# ================================================================
+# Constants
+# ================================================================
+APPROACH_THRESHOLD = 0.5     # m — considered "arrived" at Nav2 goal
+VISION_CONFIRM_EPS  = 0.3    # m — vision match threshold for grab success
+VISION_TIMEOUT      = 8.0    # s — max wait for vision after arriving
+LIFT_WAIT           = 3.0    # s — settle time after lift move
+POLL_PERIOD         = 0.5    # s — queue poll interval
+PREEMPT_WAIT        = 3.0    # s — max wait for cancel to resolve
 
-APPROACH_OFFSET = 0.50   # stop this far from target
-GOAL_FILTER_EPS = 0.2
-GOAL_UPDATE_PERIOD = 2.0
-GRAB_DURATION = 3.0
-DROP_DURATION = 3.0
-ESCAPE_DURATION = 3.0
-ESCAPE_ANGULAR = 1.0
-VISION_TIMEOUT = 5.0
+# Drop zones (world coords)
+RED_ZONE  = (-2.0, -0.5)
+BLUE_ZONE = (-2.0, 1.5)
 
 
 def quat_to_yaw(q):
@@ -39,245 +48,374 @@ def quat_to_yaw(q):
     return math.atan2(siny, cosy)
 
 
+# ================================================================
+# Brain Node
+# ================================================================
 class BrainNode(Node):
     def __init__(self):
         super().__init__('brain_node')
-        self.state = 'EXPLORE'
-        self.round = 0
 
-        self.nav_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
+        # Reentrant callback group for concurrent action handling
+        self._cbg = ReentrantCallbackGroup()
+
+        # -- Nav2 action client --
+        self._nav_client = ActionClient(
+            self, NavigateToPose, '/navigate_to_pose',
+            callback_group=self._cbg,
+        )
         self._goal_handle = None
+        self._nav_busy = False
 
-        # Campaign 2: PointStamped with world coords + type code in z
-        self.create_subscription(PointStamped, '/target_object', self.vision_cb, 10)
-        self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.amcl_cb, 10)
+        # -- Priority task queue: (priority, seq, goal_dict) --
+        self._task_queue = queue.PriorityQueue()
+        self._seq = 0
 
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # -- Active task state --
+        self._active_task = None   # dict with priority, x, y, z, handle
+        self._preempting = False
 
+        # -- Robot state --
         self._rx = 0.0; self._ry = 0.0; self._ryaw = 0.0
-        self._target_x = 0.0; self._target_y = 0.0
-        self._target_type = 0.0; self._target_seen = False
+
+        # -- Vision state --
+        self._vision_x = 0.0; self._vision_y = 0.0; self._vision_z = 0.0
+        self._vision_seen = False
         self._last_vision_t = 0.0
 
-        self._lock_timer = None
-        self._escape_timer = None
-        self._escape_done_timer = None
-        self._grab_timer = None
-        self._drop_timer = None
-        self._heal_timer = None
-        self._heal_zone = RED_DROP_ZONE
-        self._last_tx = None; self._last_ty = None
+        # -- Subscriptions --
+        self.create_subscription(
+            PointStamped, '/target_object', self._vision_cb, 10,
+            callback_group=self._cbg,
+        )
+        self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose', self._amcl_cb, 10,
+            callback_group=self._cbg,
+        )
 
-        self.get_logger().info('Brain ready (Campaign 2: world-coord vision). EXPLORE.')
-        self._start_explore()
+        # -- Publishers --
+        self._lift_pub = self.create_publisher(
+            Float64MultiArray, '/lift_controller/commands', 10,
+        )
+        self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-    # ============ Callbacks ============
-    def amcl_cb(self, msg):
+        # -- Action Server (Campaign 3 entry point) --
+        self._action_server = ActionServer(
+            self, FetchTask, 'fetch_task',
+            execute_callback=self._execute_fetch,
+            goal_callback=self._goal_callback,
+            cancel_callback=self._cancel_callback,
+            callback_group=self._cbg,
+        )
+
+        # -- Queue processor timer --
+        self._poll_timer = self.create_timer(
+            POLL_PERIOD, self._poll_queue, callback_group=self._cbg,
+        )
+
+        self.get_logger().info(
+            'Brain Campaign 3 ready. Action Server: /fetch_task'
+        )
+
+    # ============================================================
+    # Callbacks
+    # ============================================================
+    def _amcl_cb(self, msg):
         self._rx = msg.pose.pose.position.x
         self._ry = msg.pose.pose.position.y
         self._ryaw = quat_to_yaw(msg.pose.pose.orientation)
 
-    def vision_cb(self, msg):
-        if self.state == 'ESCAPE':
-            return
-        # Campaign 2: PointStamped — world coords in point field
-        self._target_x = msg.point.x
-        self._target_y = msg.point.y
-        self._target_type = msg.point.z   # 1.0=red, 2.0=blue
-        self._target_seen = True
+    def _vision_cb(self, msg):
+        self._vision_x = msg.point.x
+        self._vision_y = msg.point.y
+        self._vision_z = msg.point.z   # type code (1.0=red, 2.0=blue)
+        self._vision_seen = True
         self._last_vision_t = time.time()
-        if self.state == 'EXPLORE':
-            self._enter_lock()
 
-    # ============ EXPLORE ============
-    def _start_explore(self):
-        self._target_seen = False
-        self._target_x = 0.0
-        self._target_y = 0.0
-        self._target_type = 0.0
-        self._last_tx = None; self._last_ty = None
-        self._lock_timer = None
-        self.state = 'EXPLORE'
-        goal = random.choice(PATROL_POINTS)
-        self.round += 1
-        self.get_logger().info(f'[EXPLORE #{self.round}] Patrol -> ({goal[0]:.1f}, {goal[1]:.1f})')
-        self._send_nav_goal(goal[0], goal[1])
-
-    # ============ LOCK ============
-    def _enter_lock(self):
-        if self.state == 'LOCK':
-            return
-        self.state = 'LOCK'
-        cname = 'RED' if self._target_type < 1.5 else 'BLUE/BRN'
+    # ============================================================
+    # Action Server: goal / cancel callbacks
+    # ============================================================
+    def _goal_callback(self, goal_request):
         self.get_logger().info(
-            f'[LOCK] {cname} target at world ({self._target_x:.2f},{self._target_y:.2f})!'
+            f'[GOAL] Received task P{goal_request.priority} '
+            f'→ ({goal_request.target_x:.1f},{goal_request.target_y:.1f},'
+            f'{goal_request.target_z:.1f})'
         )
-        if self._goal_handle is not None:
-            self._goal_handle.cancel_goal_async()
-            self._goal_handle = None
-        self._last_tx = None; self._last_ty = None
-        self._lock_timer = self.create_timer(GOAL_UPDATE_PERIOD, self._lock_update)
+        return GoalResponse.ACCEPT
 
-    def _lock_update(self):
-        if self.state != 'LOCK':
+    def _cancel_callback(self, goal_handle):
+        self.get_logger().info('[CANCEL] Task cancellation requested')
+        return CancelResponse.ACCEPT
+
+    async def _execute_fetch(self, goal_handle: ServerGoalHandle):
+        """Enqueue task, wait for completion (async)."""
+        request = goal_handle.request
+        self._seq += 1
+
+        task = {
+            'priority': request.priority,
+            'x': request.target_x,
+            'y': request.target_y,
+            'z': request.target_z,
+            'seq': self._seq,
+            'handle': goal_handle,
+        }
+        self._task_queue.put((request.priority, self._seq, task))
+        self.get_logger().info(
+            f'[ENQUEUE] P{request.priority} seq={self._seq} '
+            f'→ ({request.target_x:.1f},{request.target_y:.1f},'
+            f'{request.target_z:.1f})  queue_size={self._task_queue.qsize()}'
+        )
+
+        # Wait for task completion (non-blocking)
+        result = FetchTask.Result()
+        while rclpy.ok():
+            if goal_handle.is_cancel_requested:
+                result.success = False
+                result.message = 'Cancelled'
+                goal_handle.canceled()
+                return result
+            if goal_handle.is_active and not goal_handle.is_executing:
+                # Task completed externally
+                break
+            await self._sleep_async(0.5)
+
+        result.success = True
+        result.message = 'Fetch completed'
+        goal_handle.succeed()
+        return result
+
+    async def _sleep_async(self, seconds):
+        """Non-blocking sleep for async contexts."""
+        start = time.time()
+        while time.time() - start < seconds:
+            await self._yield()
+    async def _yield(self):
+        pass  # rclpy executor yields naturally
+
+    # ============================================================
+    # Queue processor (timer callback)
+    # ============================================================
+    def _poll_queue(self):
+        if self._nav_busy:
             return
-        if time.time() - self._last_vision_t > VISION_TIMEOUT:
-            self.get_logger().info('[LOCK] Vision lost, back to EXPLORE')
-            self._lock_timer.cancel()
-            self._start_explore()
+
+        if self._task_queue.empty():
             return
 
-        tx, ty = self._target_x, self._target_y
-        dist = math.sqrt((tx - self._rx)**2 + (ty - self._ry)**2)
+        # Peek at highest-priority task
+        prio, seq, task = self._task_queue.get()
 
-        # If close enough, grab
-        if dist < APPROACH_OFFSET:
-            cname = 'RED' if self._target_type < 1.5 else 'BLUE/BRN'
-            self.get_logger().info(f'[TARGET ACQUIRED] {cname} dist={dist:.2f}m')
-            self._lock_timer.cancel()
-            self._enter_grab()
-            return
-
-        # Filter duplicate goal updates
-        if self._last_tx is not None:
-            if math.sqrt((tx - self._last_tx)**2 + (ty - self._last_ty)**2) < GOAL_FILTER_EPS:
+        # If we have an active task and the new one has higher priority
+        if self._active_task is not None:
+            active_prio = self._active_task.get('priority', 99)
+            if prio < active_prio:
+                self.get_logger().info(
+                    f'[PREEMPT] Higher priority task P{prio} arrived. '
+                    f'Canceling current P{active_prio}...'
+                )
+                self._preempt_current(active_prio, prio, seq, task)
                 return
-        self._last_tx = tx; self._last_ty = ty
-        self.get_logger().info(
-            f'[LOCK] target=({tx:.2f},{ty:.2f}) dist={dist:.2f}m'
-        )
-        self._send_nav_goal(tx, ty)
+            else:
+                # Re-enqueue and stay busy
+                self._task_queue.put((prio, seq, task))
+                return
 
-    # ============ GRAB ============
-    def _enter_grab(self):
-        self.state = 'GRAB'
-        cname = 'RED' if self._target_type < 1.5 else 'BLUE/BRN'
-        self.get_logger().info(f'[GRAB] Loading {cname} cargo... (3s)')
+        self._execute_task(prio, seq, task)
+
+    def _preempt_current(self, old_prio, new_prio, new_seq, new_task):
+        """Cancel active Nav2 goal and re-queue the interrupted task."""
+        self._preempting = True
+
+        # Re-queue interrupted task (restore at its original priority)
+        if self._active_task:
+            self._active_task['restored'] = True
+            self._task_queue.put(
+                (old_prio, self._active_task.get('seq', 0), self._active_task)
+            )
+
+        # Cancel Nav2 goal
         if self._goal_handle is not None:
-            self._goal_handle.cancel_goal_async()
-            self._goal_handle = None
-        self._stop_robot()
-        self._grab_timer = self.create_timer(GRAB_DURATION, self._grab_done)
+            self.get_logger().info(
+                '[PREEMPT] Canceling current Nav2 goal...'
+            )
+            future = self._goal_handle.cancel_goal_async()
+            # Fire-and-forget; nav completion triggers via result callback
 
-    def _grab_done(self):
-        if self._grab_timer is not None:
-            self._grab_timer.cancel()
-            self._grab_timer = None
-        self.get_logger().info('[GRAB] Cargo loaded! Returning to base.')
-        self._start_return()
+        self._active_task = None
+        self._nav_busy = False
+        self._preempting = False
 
-    # ============ RETURN ============
-    def _start_return(self):
-        self.state = 'RETURN'
-        is_red = self._target_type < 1.5
-        zone = RED_DROP_ZONE if is_red else BLUE_DROP_ZONE
-        cname = 'RED zone' if is_red else 'BLUE zone'
-        self.get_logger().info(f'[RETURN] -> {cname} ({zone[0]:.1f},{zone[1]:.1f})')
-        self._send_nav_goal(zone[0], zone[1])
+        # Immediately execute the higher-priority task
+        self._task_queue.put((new_prio, new_seq, new_task))
+        self._poll_queue()
 
-    # ============ DROP ============
-    def _enter_drop(self):
-        self.state = 'DROP'
-        cname = 'RED' if self._target_type < 1.5 else 'BLUE/BRN'
-        self.get_logger().info(f'[DROP] Unloading {cname} cargo... (3s)')
-        self._stop_robot()
-        self._drop_timer = self.create_timer(DROP_DURATION, self._drop_done)
+    # ============================================================
+    # Task execution pipeline
+    # ============================================================
+    def _execute_task(self, prio, seq, task):
+        """Stateful pipeline: NAVIGATE → LIFT → VISION_CONFIRM."""
+        self._active_task = task
+        handle = task.get('handle')
+        restored = task.get('restored', False)
 
-    def _drop_done(self):
-        if self._drop_timer is not None:
-            self._drop_timer.cancel()
-            self._drop_timer = None
-        self.get_logger().info('[DROP] Done! Starting ESCAPE turn...')
-        self._start_escape()
+        tag = 'RESTORED' if restored else 'NEW'
+        self.get_logger().info(
+            f'[EXEC {tag}] P{prio} seq={seq} '
+            f'→ ({task["x"]:.1f},{task["y"]:.1f},{task["z"]:.1f})'
+        )
 
-    # ============ ESCAPE ============
-    def _start_escape(self):
-        self.state = 'ESCAPE'
-        self.get_logger().info(f'[ESCAPE] Turning 180deg for {ESCAPE_DURATION}s...')
-        self._escape_start_time = time.time()
-        self._escape_timer = self.create_timer(0.1, self._publish_escape_twist)
-        self._escape_done_timer = self.create_timer(ESCAPE_DURATION, self._escape_done)
+        if handle:
+            feedback = FetchTask.Feedback()
+            feedback.current_state = 'NAVIGATING'
+            handle.publish_feedback(feedback)
 
-    def _publish_escape_twist(self):
-        if self.state != 'ESCAPE':
-            return
-        if time.time() - self._escape_start_time > ESCAPE_DURATION:
-            return
-        twist = Twist()
-        twist.angular.z = ESCAPE_ANGULAR
-        self.cmd_pub.publish(twist)
+        self._nav_busy = True
+        self._send_nav_goal(task['x'], task['y'], on_done=lambda ok: (
+            self._on_nav_done(ok, prio, seq, task)
+        ))
 
-    def _escape_done(self):
-        if self._escape_done_timer is not None:
-            self._escape_done_timer.cancel()
-            self._escape_done_timer = None
-        if self._escape_timer is not None:
-            self._escape_timer.cancel()
-            self._escape_timer = None
-        self._stop_robot()
-        self.get_logger().info('[ESCAPE] Turn complete! Restarting EXPLORE.')
-        self._start_explore()
+    # ============================================================
+    # Nav2: send goal + result handler
+    # ============================================================
+    def _send_nav_goal(self, gx, gy, on_done=None):
+        self._nav_client.wait_for_server()
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.pose.position.x = gx
+        goal.pose.pose.position.y = gy
+        goal.pose.pose.orientation.w = 1.0
 
-    # ============ Helpers ============
-    def _stop_robot(self):
-        stop = Twist(); stop.linear.x = 0.0; stop.angular.z = 0.0
-        self.cmd_pub.publish(stop)
+        send_future = self._nav_client.send_goal_async(goal)
+        send_future.add_done_callback(
+            lambda f: self._nav_goal_response(f, on_done)
+        )
 
-    def _send_nav_goal(self, gx, gy):
-        self.nav_client.wait_for_server()
-        nav_goal = NavigateToPose.Goal()
-        nav_goal.pose.header.frame_id = 'map'
-        nav_goal.pose.pose.position.x = gx
-        nav_goal.pose.pose.position.y = gy
-        nav_goal.pose.pose.orientation.w = 1.0
-        future = self.nav_client.send_goal_async(nav_goal)
-        future.add_done_callback(self._nav_response_cb)
-
-    def _nav_response_cb(self, future):
+    def _nav_goal_response(self, future, on_done):
         self._goal_handle = future.result()
         if self._goal_handle is None:
-            self.get_logger().error('Nav2 goal rejected')
-            self._nav_failed()
+            self.get_logger().error('[NAV] Goal rejected by server')
+            self._nav_busy = False
+            if on_done:
+                on_done(False)
             return
-        self._goal_handle.get_result_async().add_done_callback(self._nav_result_cb)
+        self._goal_handle.get_result_async().add_done_callback(
+            lambda f: self._nav_result(f, on_done)
+        )
 
-    def _nav_result_cb(self, future):
+    def _nav_result(self, future, on_done):
         result = future.result()
         status = result.status if result else -1
-        if status == 4:
-            if self.state == 'EXPLORE':
-                self.get_logger().info('[EXPLORE] Waypoint reached, next...')
-                self._start_explore()
-            elif self.state == 'RETURN':
-                self.get_logger().info('[RETURN] Arrived at drop zone!')
-                self._enter_drop()
+        self._goal_handle = None
+
+        if status == 4:  # SUCCEEDED
+            self.get_logger().info('[NAV] Goal reached')
+            if on_done:
+                on_done(True)
+        else:
+            self.get_logger().warn(f'[NAV] Failed (status={status})')
+            if on_done:
+                on_done(False)
+
+    def _on_nav_done(self, ok, prio, seq, task):
+        """Navigation complete → lift to target Z."""
+        if not ok:
+            self._nav_busy = False
+            self._active_task = None
+            self._fail_task(task, 'Nav2 failed')
             return
-        self.get_logger().warn(f'Nav2 failed (status={status}), self-healing...')
-        self._nav_failed()
 
-    def _nav_failed(self):
-        if self.state == 'EXPLORE':
-            self.get_logger().info('[HEAL] Trying next waypoint')
-            self._start_explore()
-        elif self.state == 'RETURN':
-            is_red = self._target_type < 1.5
-            self._heal_zone = RED_DROP_ZONE if is_red else BLUE_DROP_ZONE
-            self.get_logger().info(f'[HEAL] RETURN failed, retrying in 3s...')
-            if self._heal_timer is not None:
-                self._heal_timer.cancel()
-            self._heal_timer = self.create_timer(3.0, self._heal_retry_cb)
+        handle = task.get('handle')
+        if handle:
+            fb = FetchTask.Feedback()
+            fb.current_state = 'LIFTING'
+            handle.publish_feedback(fb)
 
-    def _heal_retry_cb(self):
-        if self._heal_timer is not None:
-            self._heal_timer.cancel()
-            self._heal_timer = None
-        self._send_nav_goal(self._heal_zone[0], self._heal_zone[1])
+        # Move lift to target Z
+        z_target = task['z']
+        self.get_logger().info(f'[LIFT] Moving to Z={z_target:.2f}m')
+        msg = Float64MultiArray()
+        msg.data = [float(z_target)]
+        self._lift_pub.publish(msg)
+
+        # Wait for lift to settle, then confirm vision
+        self._lift_timer = self.create_timer(
+            LIFT_WAIT,
+            lambda: self._on_lift_done(prio, seq, task),
+            callback_group=self._cbg,
+        )
+
+    def _on_lift_done(self, prio, seq, task):
+        """Lift settled → vision confirmation."""
+        if self._lift_timer:
+            self._lift_timer.cancel()
+            self._lift_timer = None
+
+        handle = task.get('handle')
+        if handle:
+            fb = FetchTask.Feedback()
+            fb.current_state = 'CONFIRMING'
+            handle.publish_feedback(fb)
+
+        # Vision confirmation loop (poll via timer)
+        self._vision_start_time = time.time()
+        self._vision_task = task
+        self._vision_prio = prio
+        self._vision_seq = seq
+        self._vision_timer = self.create_timer(
+            0.5, self._vision_poll, callback_group=self._cbg,
+        )
+
+    def _vision_poll(self):
+        """Check if vision sees the target within error threshold."""
+        elapsed = time.time() - self._vision_start_time
+        task = self._vision_task
+        tx, ty, tz = task['x'], task['y'], task['z']
+
+        if self._vision_seen:
+            err = math.sqrt(
+                (self._vision_x - tx) ** 2 +
+                (self._vision_y - ty) ** 2
+                # Z comparison skipped (type_code in point.z, not world Z)
+            )
+            dist = math.sqrt(
+                (self._vision_x - self._rx) ** 2 +
+                (self._vision_y - self._ry) ** 2
+            )
+            if dist < VISION_CONFIRM_EPS:
+                self.get_logger().info(
+                    f'[CONFIRM] Vision match! err={err:.2f}m dist={dist:.2f}m'
+                )
+                self._vision_timer.cancel()
+                self._succeed_task(task)
+                return
+
+        if elapsed > VISION_TIMEOUT:
+            self.get_logger().warn(
+                f'[CONFIRM] Vision timeout ({elapsed:.1f}s)'
+            )
+            self._vision_timer.cancel()
+            self._fail_task(task, 'Vision confirmation timeout')
+
+    # ============================================================
+    # Task completion
+    # ============================================================
+    def _succeed_task(self, task):
+        self._nav_busy = False
+        self._active_task = None
+        self.get_logger().info('[TASK] SUCCESS')
+
+    def _fail_task(self, task, reason):
+        self._nav_busy = False
+        self._active_task = None
+        self.get_logger().error(f'[TASK] FAILED: {reason}')
 
 
+# ============================================================
+# Entrypoint
+# ============================================================
 def main():
     rclpy.init()
     node = BrainNode()
-    from rclpy.executors import MultiThreadedExecutor
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     try:

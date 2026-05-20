@@ -1,0 +1,11 @@
+# Priority: 1 = URGENT (preempts level 2), 2 = NORMAL
+int32 priority
+float64 target_x
+float64 target_y
+float64 target_z
+---
+bool success
+string message
+---
+string current_state
+float64 distance_to_target

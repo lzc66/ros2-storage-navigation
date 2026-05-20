@@ -12,11 +12,13 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(gazebo_msgs REQUIRED)
+find_package(action_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
-# Custom service interface
+# Custom interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SpawnItem.srv"
+  "action/FetchTask.action"
 )
 
 add_executable(main_node src/main_node.cpp)
@@ -41,6 +43,7 @@ install(PROGRAMS
   scripts/dynamic_obstacle.py
   scripts/sim_manager.py
   scripts/calibration_check.py
+  scripts/task_emitter.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
