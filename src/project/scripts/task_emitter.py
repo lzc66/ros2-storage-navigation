@@ -17,18 +17,20 @@ from project.action import FetchTask
 
 
 class TaskEmitter(Node):
-    def __init__(self, priority, x, y, z, yaw, wait):
+    def __init__(self, priority, x, y, z, yaw, drop_x, drop_y, drop_yaw, wait):
         super().__init__('task_emitter')
         self._client = ActionClient(self, FetchTask, 'fetch_task')
         self._priority = priority
         self._x = x; self._y = y; self._z = z; self._yaw = yaw
+        self._drop_x = drop_x; self._drop_y = drop_y; self._drop_yaw = drop_yaw
         self._wait = wait
         self._done = False
 
     def send(self):
         self.get_logger().info(
             f'Sending task P{self._priority} → '
-            f'({self._x:.1f},{self._y:.1f},{self._z:.1f}) yaw={self._yaw:.2f}'
+            f'pick({self._x:.1f},{self._y:.1f},{self._z:.1f}) yaw={self._yaw:.2f} '
+            f'drop({self._drop_x:.1f},{self._drop_y:.1f})'
         )
         if not self._client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error('Action server /fetch_task not available')
@@ -41,6 +43,9 @@ class TaskEmitter(Node):
         goal.target_y = self._y
         goal.target_z = self._z
         goal.target_yaw = self._yaw
+        goal.drop_x = self._drop_x
+        goal.drop_y = self._drop_y
+        goal.drop_yaw = self._drop_yaw
 
         send_future = self._client.send_goal_async(
             goal, feedback_callback=self._feedback_cb,
@@ -86,11 +91,20 @@ def main():
                         help='target Z (lift height)')
     parser.add_argument('--yaw', type=float, default=0.0,
                         help='target yaw in rad (0=+X, 1.57=+Y, 3.14=-X)')
+    parser.add_argument('--drop-x', type=float, default=-2.0,
+                        help='drop zone X (default: -2.0)')
+    parser.add_argument('--drop-y', type=float, default=-0.5,
+                        help='drop zone Y (default: -0.5)')
+    parser.add_argument('--drop-yaw', type=float, default=0.0,
+                        help='drop zone heading (default: 0.0)')
     parser.add_argument('--wait', action='store_true',
                         help='wait for task completion before exit')
     args = parser.parse_args()
 
-    node = TaskEmitter(args.priority, args.x, args.y, args.z, args.yaw, args.wait)
+    node = TaskEmitter(
+        args.priority, args.x, args.y, args.z, args.yaw,
+        args.drop_x, args.drop_y, args.drop_yaw, args.wait,
+    )
     node.send()
 
     if args.wait:

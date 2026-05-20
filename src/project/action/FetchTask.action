@@ -3,7 +3,10 @@ int32 priority
 float64 target_x
 float64 target_y
 float64 target_z
-float64 target_yaw   # desired body heading at arrival (rad, 0=+X, 1.57=+Y)
+float64 target_yaw      # desired body heading at arrival (rad, 0=+X, 1.57=+Y)
+float64 drop_x          # ground delivery X
+float64 drop_y          # ground delivery Y
+float64 drop_yaw        # ground delivery heading
 ---
 bool success
 string message

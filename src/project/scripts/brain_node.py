@@ -1,13 +1,12 @@
 #!/usr/bin/python3
 """
-Campaign 4: 4D Task Protocol + Active Search Micro-behavior.
+Campaign 5: Vacuum Gripper + Full Pick-and-Place Pipeline.
 
 Architecture:
-  - Action Server: accepts FetchTask (priority, target_x/y/z/yaw)
+  - Action Server: FetchTask (priority, x/y/z/yaw, drop_x/y/yaw)
   - PriorityQueue with safe Nav2 preemption
-  - Nav2 with strict pose orientation (yaw → quaternion)
-  - Active search: slow rotation (≤0.2 rad/s) when vision misses target
-  - High-CoG safety: angular speed throttled when lift elevated
+  - Nav2 → Lift → Active Search → Approach → Grip → Retreat → Drop-off
+  - Async gripper service client (/gripper/switch)
 """
 import math
 import queue
@@ -23,6 +22,7 @@ from rclpy.executors import MultiThreadedExecutor
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, Twist
 from std_msgs.msg import Float64MultiArray
+from std_srvs.srv import SetBool
 
 from project.action import FetchTask
 
@@ -39,9 +39,17 @@ SEARCH_ANGULAR_SPEED = 0.15   # rad/s — safe slow rotation (≤0.2)
 SEARCH_POLL_PERIOD   = 0.1     # s — search loop frequency
 HIGH_LIFT_Z          = 0.4     # m — above this, enforce speed limit
 
+# Campaign 5: Grasping sequence
+APPROACH_SPEED      = 0.05    # m/s — gentle forward creep to contact target
+APPROACH_DURATION   = 1.5     # s — creep duration
+RETREAT_SPEED        = -0.1    # m/s — pull back after gripping
+RETREAT_DURATION    = 1.0     # s — retreat duration
+DROP_LIFT_Z          = 0.05    # m — near-ground release height (anti-bounce)
+BACKAWAY_SPEED       = -0.15   # m/s — exit drop zone after release
+BACKAWAY_DURATION   = 1.5     # s — back away duration
+DROPOFF_WAIT         = 2.0     # s — settle time after lift lowers for drop
+
 # Drop zones (world coords)
-RED_ZONE  = (-2.0, -0.5)
-BLUE_ZONE = (-2.0, 1.5)
 
 
 def quat_to_yaw(q):
@@ -105,6 +113,11 @@ class BrainNode(Node):
         )
         self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
+        # -- Gripper service client (Campaign 5) --
+        self._gripper_cli = self.create_client(
+            SetBool, '/gripper/switch', callback_group=self._cbg,
+        )
+
         # -- Action Server (Campaign 3 entry point) --
         self._action_server = ActionServer(
             self, FetchTask, 'fetch_task',
@@ -164,6 +177,9 @@ class BrainNode(Node):
             'y': request.target_y,
             'z': request.target_z,
             'yaw': request.target_yaw,
+            'drop_x': request.drop_x,
+            'drop_y': request.drop_y,
+            'drop_yaw': request.drop_yaw,
             'seq': self._seq,
             'handle': goal_handle,
         }
@@ -446,7 +462,8 @@ class BrainNode(Node):
                 self.get_logger().info(f'[CONFIRM] Target acquired! err={err:.2f}m')
                 self._vision_timer.cancel()
                 self._stop_rotation()
-                self._succeed_task(task)
+                # Campaign 5: approach → grip → retreat → drop-off
+                self._start_approach(task)
                 return
 
         # If timeout → fail
@@ -484,12 +501,165 @@ class BrainNode(Node):
     def _succeed_task(self, task):
         self._nav_busy = False
         self._active_task = None
-        self.get_logger().info('[TASK] SUCCESS')
+        handle = task.get('handle')
+        if handle and handle.is_active:
+            fb = FetchTask.Feedback()
+            fb.current_state = 'DONE'
+            handle.publish_feedback(fb)
+        self.get_logger().info('[TASK] SUCCESS — full pick-and-place complete')
 
     def _fail_task(self, task, reason):
         self._nav_busy = False
         self._active_task = None
         self.get_logger().error(f'[TASK] FAILED: {reason}')
+
+    # ============================================================
+    # Campaign 5: Grasping pipeline
+    # ============================================================
+    def _start_approach(self, task):
+        """Creep forward to make suction cup contact with target."""
+        self.get_logger().info('[APPROACH] Forward creep to contact target...')
+        twist = Twist()
+        twist.linear.x = APPROACH_SPEED
+        self._cmd_pub.publish(twist)
+        self._approach_timer = self.create_timer(
+            APPROACH_DURATION,
+            lambda: self._on_approach_done(task),
+            callback_group=self._cbg,
+        )
+
+    def _on_approach_done(self, task):
+        """Approach complete — brake and activate suction."""
+        self._approach_timer.cancel()
+        self._stop_rotation()  # zero Twist
+        self._start_grip(task)
+
+    def _start_grip(self, task):
+        """Activate vacuum gripper via /gripper/switch."""
+        self.get_logger().info('[GRIP] Activating suction...')
+        if not self._gripper_cli.wait_for_service(timeout_sec=2.0):
+            self.get_logger().error('[GRIP] /gripper/switch unavailable')
+            self._fail_task(task, 'Gripper service not available')
+            return
+        req = SetBool.Request()
+        req.data = True
+        future = self._gripper_cli.call_async(req)
+        future.add_done_callback(lambda f: self._on_grip_done(f, task))
+
+    def _on_grip_done(self, future, task):
+        """Suction engaged — retreat to pull object out."""
+        try:
+            resp = future.result()
+            if resp.success:
+                self.get_logger().info('[GRIP] Suction ON — object attached')
+                self._start_retreat(task)
+            else:
+                self.get_logger().error(f'[GRIP] Suction failed: {resp.message}')
+                self._fail_task(task, 'Grip failed')
+        except Exception as e:
+            self.get_logger().error(f'[GRIP] Service call error: {e}')
+            self._fail_task(task, 'Grip service error')
+
+    def _start_retreat(self, task):
+        """Pull object out of shelf by backing up."""
+        self.get_logger().info('[RETREAT] Pulling object out...')
+        twist = Twist()
+        twist.linear.x = RETREAT_SPEED
+        self._cmd_pub.publish(twist)
+        self._retreat_timer = self.create_timer(
+            RETREAT_DURATION,
+            lambda: self._on_retreat_done(task),
+            callback_group=self._cbg,
+        )
+
+    def _on_retreat_done(self, task):
+        """Retreat complete — navigate to drop zone."""
+        self._retreat_timer.cancel()
+        self._stop_rotation()
+        self._start_drop_nav(task)
+
+    def _start_drop_nav(self, task):
+        """Navigate to drop coordinates with cargo."""
+        handle = task.get('handle')
+        if handle:
+            fb = FetchTask.Feedback()
+            fb.current_state = 'DROPPING'
+            handle.publish_feedback(fb)
+
+        gx = task.get('drop_x', task.get('x', 0.0))
+        gy = task.get('drop_y', task.get('y', 0.0))
+        gyaw = task.get('drop_yaw', 0.0)
+        self.get_logger().info(f'[DROP-NAV] → ({gx:.1f},{gy:.1f})')
+        self._send_nav_goal(gx, gy, gyaw, on_done=lambda ok: (
+            self._on_drop_nav_done(ok, task)
+        ))
+
+    def _on_drop_nav_done(self, ok, task):
+        """Arrived at drop zone — lower lift + release + back away."""
+        if not ok:
+            self._fail_task(task, 'Drop nav failed')
+            return
+        self._start_drop_off(task)
+
+    def _start_drop_off(self, task):
+        """Lower lift to near-ground, release object, back away."""
+        self.get_logger().info(f'[DROP-OFF] Lowering lift to Z={DROP_LIFT_Z}m...')
+        msg = Float64MultiArray()
+        msg.data = [float(DROP_LIFT_Z)]
+        self._lift_pub.publish(msg)
+
+        self._dropoff_timer = self.create_timer(
+            DROPOFF_WAIT,
+            lambda: self._on_drop_off_release(task),
+            callback_group=self._cbg,
+        )
+
+    def _on_drop_off_release(self, task):
+        """Lift settled — release suction + back away."""
+        if self._dropoff_timer:
+            self._dropoff_timer.cancel()
+            self._dropoff_timer = None
+
+        self.get_logger().info('[DROP-OFF] Releasing suction...')
+        if self._gripper_cli.wait_for_service(timeout_sec=2.0):
+            req = SetBool.Request()
+            req.data = False
+            future = self._gripper_cli.call_async(req)
+            future.add_done_callback(lambda f: self._on_release_done(f, task))
+        else:
+            self.get_logger().error('[DROP-OFF] Gripper unavailable for release')
+            self._finish_drop_off(task)
+
+    def _on_release_done(self, future, task):
+        """Suction off — back away from cargo."""
+        try:
+            resp = future.result()
+            self.get_logger().info(
+                f'[DROP-OFF] Suction OFF: {resp.message if resp.success else "FAILED"}'
+            )
+        except Exception:
+            pass
+        self._finish_drop_off(task)
+
+    def _finish_drop_off(self, task):
+        """Back away and complete the task."""
+        self.get_logger().info('[DROP-OFF] Backing away...')
+        twist = Twist()
+        twist.linear.x = BACKAWAY_SPEED
+        self._cmd_pub.publish(twist)
+        self._backaway_timer = self.create_timer(
+            BACKAWAY_DURATION,
+            lambda: self._on_drop_off_done(task),
+            callback_group=self._cbg,
+        )
+
+    def _on_drop_off_done(self, task):
+        """Full pick-and-place complete."""
+        if self._backaway_timer:
+            self._backaway_timer.cancel()
+            self._backaway_timer = None
+        self._stop_rotation()
+        self._succeed_task(task)
 
 
 # ============================================================

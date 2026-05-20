@@ -4,6 +4,7 @@
   <xacro:include filename="$(find linorobot2_description)/urdf/mech/base.urdf.xacro" />
   <xacro:include filename="$(find linorobot2_description)/urdf/mech/mecanum_wheel.urdf.xacro" />
   <xacro:include filename="$(find linorobot2_description)/urdf/mech/lift.urdf.xacro" />
+  <xacro:include filename="$(find linorobot2_description)/urdf/mech/gripper.urdf.xacro" />
   <xacro:include filename="$(find linorobot2_description)/urdf/sensors/plugins.urdf.xacro" />
   <xacro:include filename="$(find linorobot2_description)/urdf/sensors/imu.urdf.xacro" />
   <xacro:include filename="$(find linorobot2_description)/urdf/sensors/generic_laser.urdf.xacro" />
@@ -66,6 +67,9 @@
 
   <!-- Prismatic lift mechanism (base_link → lift_link, 0.0–0.8m Z range) -->
   <xacro:lift_mechanism base_length="${base_length}" />
+
+  <!-- Campaign 5: Vacuum suction gripper mounted on lift_link -->
+  <xacro:vacuum_gripper parent_link="lift_link" lift_z="0.0" />
 
   <!-- Sensors mounted on lift_link for multi-level scanning -->
   <xacro:imu parent_link="lift_link">

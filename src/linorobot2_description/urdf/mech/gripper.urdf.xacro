@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://ros.org/wiki/xacro">
+  <xacro:macro name="vacuum_gripper" params="parent_link lift_z">
+    <!-- Suction cup link: extends forward (+X) from the lift_link front face.
+         Positioned to NOT overlap with lift_link collision geometry.
+         The lift_link collision box is (base_length*0.6, base_length*0.4, 0.02)
+         centred at (0, 0, 0.05).  Suction cup origin is at the front edge. -->
+    <link name="suction_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 1.570796 0"/>
+        <geometry>
+          <cylinder radius="0.02" length="0.06"/>
+        </geometry>
+        <material name="black">
+          <color rgba="0.1 0.1 0.1 1.0"/>
+        </material>
+      </visual>
+
+      <collision>
+        <!-- Small collision volume: 4cm radius × 6cm cylinder, no overlap with lift_link -->
+        <origin xyz="0 0 0" rpy="0 1.570796 0"/>
+        <geometry>
+          <cylinder radius="0.02" length="0.06"/>
+        </geometry>
+      </collision>
+
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="0.05"/>  <!-- very light -->
+        <inertia ixx="1e-5" ixy="0.0" ixz="0.0"
+                 iyy="1e-5" iyz="0.0"
+                 izz="1e-5"/>
+      </inertial>
+    </link>
+
+    <!-- Fixed joint: front of lift_link → suction cup tip -->
+    <joint name="suction_joint" type="fixed">
+      <parent link="${parent_link}"/>
+      <child link="suction_link"/>
+      <!-- Position at front face of lift_link (lift_link visual/collision front edge) -->
+      <origin xyz="0.12 0 0.05" rpy="0 0 0"/>
+    </joint>
+
+    <!-- gazebo_ros_vacuum_gripper plugin -->
+    <gazebo>
+      <plugin filename="libgazebo_ros_vacuum_gripper.so"
+              name="gazebo_ros_vacuum_gripper">
+        <ros>
+          <namespace>/gripper</namespace>
+          <remapping>switch:=switch</remapping>
+        </ros>
+        <link_name>suction_link</link_name>
+        <max_distance>0.04</max_distance>
+        <min_distance>0.005</min_distance>
+        <fixed>false</fixed>
+      </plugin>
+    </gazebo>
+
+    <gazebo reference="suction_link">
+      <visual>
+        <material>
+          <ambient>0.15 0.15 0.15 1.0</ambient>
+          <diffuse>0.15 0.15 0.15 1.0</diffuse>
+        </material>
+      </visual>
+    </gazebo>
+  </xacro:macro>
+</robot>
