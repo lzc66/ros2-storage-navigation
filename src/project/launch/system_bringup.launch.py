@@ -50,7 +50,8 @@ def generate_launch_description():
         world_xml = f.read()
     world_xml = world_xml.replace(
         '</world>',
-        '  <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so"/>\n</world>'
+        '  <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so"/>\n'
+        '</world>'
     )
     with open(dyn_world, 'w') as f:
         f.write(world_xml)
@@ -65,17 +66,20 @@ def generate_launch_description():
         cmd=['gzclient'], output='screen',
     )
 
-    # --- Linorobot2 Mecanum: URDF via xacro ---
+    # --- Linorobot2 Mecanum: xacro → temp URDF → file spawn ---
     import xacro
     urdf_file = os.path.join(lino_desc_share, 'urdf', 'robots', 'mecanum.urdf.xacro')
     robot_desc = xacro.process_file(urdf_file).toprettyxml(indent='  ')
+    robot_urdf_path = '/tmp/linorobot2_mecanum.urdf'
+    with open(robot_urdf_path, 'w') as f:
+        f.write(robot_desc)
 
-    # Spawn linorobot2 mecanum via robot_description topic
+    # Spawn via URDF file + -param robot_description for ROS plugins
     spawn_robot = Node(
         package='gazebo_ros', executable='spawn_entity.py',
         arguments=[
             '-entity', 'linorobot2',
-            '-topic', 'robot_description',
+            '-file', robot_urdf_path,
             '-x', '-2.0', '-y', '-0.5', '-z', '0.1', '-unpause',
         ],
         output='screen',
