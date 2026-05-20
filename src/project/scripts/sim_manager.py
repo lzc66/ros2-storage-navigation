@@ -18,12 +18,17 @@ _DISCOVERY_PROC = None
 
 
 def _ros2(cmd: str, check=True, timeout=None, capture=False):
-    """Wrap a ROS 2 command with environment sourcing."""
+    """Wrap a ROS 2 command with environment sourcing + DDS env inheritance."""
     full = f"source {SETUP_BASH} && {cmd}"
     print(f'[EXEC] {cmd[:120]}...' if len(cmd) > 120 else f'[EXEC] {cmd}')
+    # Inherit parent env (ROS_DOMAIN_ID, ROS_DISCOVERY_SERVER, etc.)
+    sub_env = os.environ.copy()
+    sub_env.setdefault('ROS_DOMAIN_ID', '30')
+    sub_env.setdefault('ROS_DISCOVERY_SERVER', '127.0.0.1:11811')
     try:
         return subprocess.run(full, shell=True, executable='/bin/bash', check=check,
-                              timeout=timeout, capture_output=capture, text=True)
+                              timeout=timeout, capture_output=capture, text=True,
+                              env=sub_env)
     except subprocess.CalledProcessError as e:
         print(f'[ERROR] Command failed (exit {e.returncode})')
         if capture:

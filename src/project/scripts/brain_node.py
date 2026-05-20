@@ -22,8 +22,9 @@ from rclpy.executors import MultiThreadedExecutor
 
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, Twist
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, Header
 from std_srvs.srv import SetBool
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from project.action import FetchTask
 
@@ -73,6 +74,18 @@ def standoff_point(tx, ty, tyaw, dist=STANDOFF_DIST):
     return ox, oy
 
 
+def _make_lift_cmd(z_target):
+    """Build a JointTrajectory message for the prismatic lift joint."""
+    traj = JointTrajectory()
+    traj.joint_names = ['lift_joint']
+    point = JointTrajectoryPoint()
+    point.positions = [float(z_target)]
+    point.time_from_start.sec = 0
+    point.time_from_start.nanosec = 500_000_000  # 0.5s
+    traj.points = [point]
+    return traj
+
+
 # ================================================================
 # Brain Node
 # ================================================================
@@ -119,7 +132,7 @@ class BrainNode(Node):
 
         # -- Publishers --
         self._lift_pub = self.create_publisher(
-            Float64MultiArray, '/lift_controller/commands', 10,
+            JointTrajectory, '/lift_controller/commands', 10,
         )
         self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
@@ -427,12 +440,10 @@ class BrainNode(Node):
             fb.current_state = 'LIFTING'
             handle.publish_feedback(fb)
 
-        # Move lift to target Z
+        # Move lift to target Z (JointTrajectory for Classic plugin)
         z_target = task['z']
         self.get_logger().info(f'[LIFT] Moving to Z={z_target:.2f}m')
-        msg = Float64MultiArray()
-        msg.data = [float(z_target)]
-        self._lift_pub.publish(msg)
+        self._lift_pub.publish(_make_lift_cmd(z_target))
 
         # Wait for lift to settle, then confirm vision
         self._lift_timer = self.create_timer(
@@ -629,9 +640,7 @@ class BrainNode(Node):
     def _start_drop_off(self, task):
         """Lower lift to near-ground, release object, back away."""
         self.get_logger().info(f'[DROP-OFF] Lowering lift to Z={DROP_LIFT_Z}m...')
-        msg = Float64MultiArray()
-        msg.data = [float(DROP_LIFT_Z)]
-        self._lift_pub.publish(msg)
+        self._lift_pub.publish(_make_lift_cmd(DROP_LIFT_Z))
 
         self._dropoff_timer = self.create_timer(
             DROPOFF_WAIT,
