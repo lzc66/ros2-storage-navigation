@@ -21,6 +21,7 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 
+from gazebo_msgs.msg import ModelStates
 from gazebo_msgs.srv import GetModelState
 from project.action import FetchTask
 from project.srv import SpawnItem
@@ -55,10 +56,13 @@ class E2ETestNode(Node):
         self._start_time = time.time()
         self._task_done_time = None     # when brain_node reported completion
 
-        # GetModelState service client (Gazebo Classic)
+        # GetModelState service client (Gazebo Classic) — primary
         self._entity_cli = self.create_client(
             GetModelState, '/gazebo/get_model_state', callback_group=self._cbg,
         )
+        # ModelStates topic subscription — fallback when service unavailable
+        self._use_topic_fallback = False
+        self._states_sub = None
 
         # Spawn service client
         self._spawn_cli = self.create_client(
@@ -79,14 +83,41 @@ class E2ETestNode(Node):
     # Entity state polling — replaces /model_states subscription
     # ============================================================
     def _start_polling(self):
-        """Begin 2 Hz polling of /gazebo/get_model_state for the test box."""
-        if not self._entity_cli.wait_for_service(timeout_sec=5.0):
-            self.get_logger().error('/gazebo/get_model_state not available')
+        """Begin monitoring the test box via service or topic fallback."""
+        if self._entity_cli.wait_for_service(timeout_sec=5.0):
+            self.get_logger().info('Model state via /gazebo/get_model_state (2 Hz)')
+            self._poll_timer = self.create_timer(
+                POLL_PERIOD, self._poll_entity, callback_group=self._cbg,
+            )
+        else:
+            self.get_logger().warn(
+                '/gazebo/get_model_state unavailable — falling back to /gazebo/model_states topic'
+            )
+            self._use_topic_fallback = True
+            self._states_sub = self.create_subscription(
+                ModelStates, '/gazebo/model_states', self._states_cb, 10,
+                callback_group=self._cbg,
+            )
+
+    def _states_cb(self, msg):
+        """Fallback: extract box pose from ModelStates topic."""
+        try:
+            idx = msg.name.index(BOX_NAME)
+        except ValueError:
             return
-        self.get_logger().info('Model state polling started (2 Hz)')
-        self._poll_timer = self.create_timer(
-            POLL_PERIOD, self._poll_entity, callback_group=self._cbg,
-        )
+        pose = msg.pose[idx]
+        x, y, z = pose.position.x, pose.position.y, pose.position.z
+        t = time.time() - self._start_time
+        with self._lock:
+            self._trajectory.append((x, y, z, t))
+            self._final_pos = (x, y, z)
+            if self._initial_z is None:
+                self._initial_z = z
+            rise = z - (self._initial_z or 0.0)
+            if rise > self._grasp_rise:
+                self._grasp_rise = rise
+            if not self._grasp_detected and rise > GRASP_RISE_MIN:
+                self._grasp_detected = True
 
     def _poll_entity(self):
         """Query Gazebo Classic for the test box pose."""
