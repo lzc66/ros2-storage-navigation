@@ -9,8 +9,8 @@
   <xacro:include filename="$(find linorobot2_description)/urdf/sensors/imu.urdf.xacro" />
   <xacro:include filename="$(find linorobot2_description)/urdf/sensors/generic_laser.urdf.xacro" />
   <xacro:include filename="$(find linorobot2_description)/urdf/sensors/depth_sensor.urdf.xacro" />
-  <!-- ros2_control plugin replaces gz-sim omni_drive_controller for Gazebo Classic -->
-  <xacro:include filename="$(find linorobot2_description)/urdf/controllers/gazebo_ros2_control.urdf.xacro" />
+  <!-- Gazebo Classic diff_drive plugin (replaces ros2_control which crashes on Humble) -->
+  <xacro:include filename="$(find linorobot2_description)/urdf/controllers/gazebo_classic_drive.urdf.xacro" />
 
   <!-- Chassis base -->
   <xacro:base
@@ -84,6 +84,6 @@
     <xacro:insert_block name="depth_sensor_pose" />
   </xacro:depth_sensor>
 
-  <!-- gazebo_ros2_control plugin (Gazebo Classic) -->
-  <xacro:gazebo_ros2_control_plugin />
+  <!-- Gazebo Classic diff_drive + joint_state_publisher -->
+  <xacro:classic_drive_plugin />
 </robot>

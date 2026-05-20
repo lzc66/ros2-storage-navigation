@@ -88,23 +88,6 @@ def generate_launch_description():
         output='screen',
     )
 
-    # --- ros2_control: controller spawners for mecanum + lift ---
-    joint_state_spawner = Node(
-        package='controller_manager', executable='spawner',
-        arguments=['joint_state_broadcaster', '--controller-manager', '/controller_manager'],
-        output='screen',
-    )
-    mecanum_spawner = Node(
-        package='controller_manager', executable='spawner',
-        arguments=['mecanum_controller', '--controller-manager', '/controller_manager'],
-        output='screen',
-    )
-    lift_spawner = Node(
-        package='controller_manager', executable='spawner',
-        arguments=['lift_controller', '--controller-manager', '/controller_manager'],
-        output='screen',
-    )
-
     # --- Nav2 nodes ---
     map_server = Node(package='nav2_map_server', executable='map_server',
                       parameters=[nav2_params,
@@ -151,17 +134,16 @@ def generate_launch_description():
     return LaunchDescription([
         use_sim_time, set_model_path, set_py_unbuf, set_robot_base,
         gzserver, gzclient,
-        TimerAction(period=20.0, actions=[spawn_robot]),
-        # robot_state_publisher must be up before controller_manager
+        # robot_state_publisher provides URDF for spawn_entity -topic
         TimerAction(period=1.0, actions=[robot_state_pub]),
-        TimerAction(period=3.0, actions=[joint_state_spawner]),
-        TimerAction(period=5.0, actions=[mecanum_spawner, lift_spawner]),
-        TimerAction(period=8.0, actions=[
+        TimerAction(period=20.0, actions=[spawn_robot]),
+        # Controller spawners AFTER robot spawn (gazebo_ros2_control creates /controller_manager)
+        TimerAction(period=30.0, actions=[
             map_server, amcl, lifecycle_mgr_loc,
             planner_server, controller_server, bt_navigator,
             behavior_server, waypoint_follower, velocity_smoother,
             lifecycle_mgr_nav,
         ]),
-        TimerAction(period=12.0, actions=[vision_node, brain_node, item_spawner]),
-        TimerAction(period=14.0, actions=[dynamic_obstacle]),
+        TimerAction(period=35.0, actions=[vision_node, brain_node, item_spawner]),
+        TimerAction(period=38.0, actions=[dynamic_obstacle]),
     ])

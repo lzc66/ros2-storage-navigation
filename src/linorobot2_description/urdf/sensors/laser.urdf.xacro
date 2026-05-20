@@ -45,13 +45,12 @@
     </joint>
 
     <gazebo reference="${frame_id}">
-      <sensor name="gpu_lidar" type="gpu_lidar">
+      <sensor name="${frame_id}_sensor" type="ray">
         <topic>${topic_name}</topic>
-        <gz_frame_id>${frame_id}</gz_frame_id>
         <update_rate>${update_rate}</update_rate>
         <always_on>true</always_on>
         <visualize>true</visualize>
-        <lidar>
+        <ray>
           <scan>
             <horizontal>
               <samples>${ray_count}</samples>
@@ -59,19 +58,13 @@
               <min_angle>${min_angle}</min_angle>
               <max_angle>${max_angle}</max_angle>
             </horizontal>
-            <vertical>
-              <samples>1</samples>
-              <resolution>1</resolution>
-              <min_angle>0.0</min_angle>
-              <max_angle>0.0</max_angle>
-            </vertical>
           </scan>
           <range>
             <min>${min_range}</min>
             <max>${max_range}</max>
             <resolution>0.01</resolution>
           </range>
-        </lidar>
+        </ray>
       </sensor>
     </gazebo>
   </xacro:macro>

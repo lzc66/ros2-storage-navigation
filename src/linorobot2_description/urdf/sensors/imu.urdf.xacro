@@ -8,17 +8,6 @@
       <xacro:insert_block name="origin" />
     </joint>
   
-    <gazebo>
-      <plugin filename="libgazebo_ros_imu_sensor.so"
-              name="gazebo_ros_imu_sensor">
-        <ros>
-          <namespace>/</namespace>
-          <remapping>~/out:=imu/data</remapping>
-        </ros>
-        <initial_orientation_as_reference>false</initial_orientation_as_reference>
-      </plugin>
-    </gazebo>
-
     <gazebo reference="imu_link">
       <sensor name="imu_sensor" type="imu">
         <topic>imu/data</topic>
