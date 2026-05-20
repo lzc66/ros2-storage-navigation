@@ -57,7 +57,7 @@ def cmd_start(_args):
     env.setdefault('CUDA_VISIBLE_DEVICES', '0')
     # Cross-platform model paths (AutoDL + WSL compatible)
     _aws_wh_models = os.path.join(WS_DIR, 'src', 'aws-robomaker-small-warehouse-world', 'models')
-    _lino_models   = os.path.join(WS_DIR, 'src', 'linorobot2', 'linorobot2_description', 'models')
+    _lino_models   = os.path.join(WS_DIR, 'src', 'linorobot2_gazebo', 'models')
     env['GAZEBO_MODEL_PATH'] = (
         os.path.join(PKG_DIR, 'models') + ':' +
         os.path.join(os.path.expanduser('~'), '.gazebo', 'models') + ':' +
