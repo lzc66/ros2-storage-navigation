@@ -215,31 +215,59 @@ class VisionNode(Node):
         )
         t2 = time.perf_counter()
 
-        if results is None or len(results[0].boxes) == 0:
-            return  # no detections
+        # --- Dual-track detection: YOLO first, HSV fallback ---
+        u, v, best_cls = None, None, None
 
-        # --- Select highest-confidence target within our class set ---
-        boxes = results[0].boxes
-        best_conf = 0.0
-        best_xyxy = None
-        best_cls = None
+        if results is not None and len(results[0].boxes) > 0:
+            boxes = results[0].boxes
+            best_conf = 0.0
+            best_xyxy = None
+            for box in boxes:
+                cls_id = int(box.cls[0])
+                if cls_id in TARGET_CLASSES:
+                    conf = float(box.conf[0])
+                    if conf > best_conf:
+                        best_conf = conf
+                        best_xyxy = box.xyxy[0].cpu().numpy()
+                        best_cls = cls_id
+            if best_xyxy is not None:
+                x1, y1, x2, y2 = best_xyxy
+                u = int((x1 + x2) / 2.0)
+                v = int((y1 + y2) / 2.0)
 
-        for box in boxes:
-            cls_id = int(box.cls[0])
-            if cls_id in TARGET_CLASSES:
-                conf = float(box.conf[0])
-                if conf > best_conf:
-                    best_conf = conf
-                    best_xyxy = box.xyxy[0].cpu().numpy()
-                    best_cls = cls_id
+        # HSV fallback: detect red/blue solid-colour geometry missed by YOLO
+        if u is None:
+            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+            # Red: two hue ranges (wraps 0/180)
+            mask_red1 = cv2.inRange(hsv, np.array([0, 100, 100]), np.array([10, 255, 255]))
+            mask_red2 = cv2.inRange(hsv, np.array([170, 100, 100]), np.array([180, 255, 255]))
+            mask_red = cv2.bitwise_or(mask_red1, mask_red2)
+            # Morphological cleanup
+            mask_red = cv2.erode(mask_red, None, iterations=2)
+            mask_red = cv2.dilate(mask_red, None, iterations=2)
+            contours, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                largest = max(contours, key=cv2.contourArea)
+                area = cv2.contourArea(largest)
+                if area > 500:  # minimum pixel area
+                    M = cv2.moments(largest)
+                    if M['m00'] > 0:
+                        u = int(M['m10'] / M['m00'])
+                        v = int(M['m01'] / M['m00'])
+                        best_cls = None  # HSV doesn't provide COCO class
+            # Debug: log max red area even when no target found
+            if u is None:
+                if not hasattr(self, '_dbg_n'):
+                    self._dbg_n = 0
+                self._dbg_n += 1
+                if self._dbg_n % 10 == 0:  # ~1 Hz (10 frames at ~10 Hz camera)
+                    max_area = cv2.contourArea(max(contours, key=cv2.contourArea)) if contours else 0
+                    self.get_logger().info(
+                        f'[VISION DEBUG] No target. Max red contour area: {max_area:.0f} px'
+                    )
 
-        if best_xyxy is None:
-            return  # no target-class objects
-
-        # --- Bounding box centre pixel ---
-        x1, y1, x2, y2 = best_xyxy
-        u = int((x1 + x2) / 2.0)
-        v = int((y1 + y2) / 2.0)
+        if u is None:
+            return  # neither YOLO nor HSV found anything
 
         # Clamp to image bounds
         u = max(0, min(u, w_img - 1))
@@ -325,10 +353,10 @@ class VisionNode(Node):
         if self._perf_n % 30 == 0:
             infer_ms = (t2 - t1) * 1000
             total_ms = (t3 - t0) * 1000
-            cls_name = TARGET_CLASSES.get(best_cls, f'cls_{best_cls}')
+            method = 'HSV' if best_cls is None else f'YOLO({TARGET_CLASSES.get(best_cls, best_cls)})'
             self.get_logger().info(
-                f'[PERF] YOLO:{infer_ms:.1f}ms Total:{total_ms:.1f}ms | '
-                f'{cls_name} (u={u},v={v}) d={d:.2f}m → '
+                f'[PERF] {method} infer:{infer_ms:.1f}ms total:{total_ms:.1f}ms | '
+                f'(u={u},v={v}) d={d:.2f}m → '
                 f'({pt_map.point.x:.2f},{pt_map.point.y:.2f},{pt_map.point.z:.2f}) [map]'
             )
 

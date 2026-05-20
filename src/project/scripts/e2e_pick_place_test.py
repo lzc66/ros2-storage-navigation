@@ -21,7 +21,7 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 
-from gazebo_msgs.srv import GetEntityState
+from gazebo_msgs.srv import GetModelState
 from project.action import FetchTask
 from project.srv import SpawnItem
 
@@ -55,9 +55,9 @@ class E2ETestNode(Node):
         self._start_time = time.time()
         self._task_done_time = None     # when brain_node reported completion
 
-        # GetEntityState service client (Gazebo)
+        # GetModelState service client (Gazebo Classic)
         self._entity_cli = self.create_client(
-            GetEntityState, '/gazebo/get_entity_state', callback_group=self._cbg,
+            GetModelState, '/gazebo/get_model_state', callback_group=self._cbg,
         )
 
         # Spawn service client
@@ -79,20 +79,20 @@ class E2ETestNode(Node):
     # Entity state polling — replaces /model_states subscription
     # ============================================================
     def _start_polling(self):
-        """Begin 2 Hz polling of /gazebo/get_entity_state for the test box."""
+        """Begin 2 Hz polling of /gazebo/get_model_state for the test box."""
         if not self._entity_cli.wait_for_service(timeout_sec=5.0):
-            self.get_logger().error('/gazebo/get_entity_state not available')
+            self.get_logger().error('/gazebo/get_model_state not available')
             return
-        self.get_logger().info('Entity state polling started (2 Hz)')
+        self.get_logger().info('Model state polling started (2 Hz)')
         self._poll_timer = self.create_timer(
             POLL_PERIOD, self._poll_entity, callback_group=self._cbg,
         )
 
     def _poll_entity(self):
-        """Query Gazebo for the test box pose."""
-        req = GetEntityState.Request()
-        req.name = BOX_NAME
-        req.reference_frame = 'world'
+        """Query Gazebo Classic for the test box pose."""
+        req = GetModelState.Request()
+        req.model_name = BOX_NAME
+        req.relative_entity_name = 'world'
         future = self._entity_cli.call_async(req)
         future.add_done_callback(self._entity_response_cb)
 
@@ -101,7 +101,8 @@ class E2ETestNode(Node):
             resp = future.result()
             if not resp.success:
                 return  # box not spawned yet or removed
-            pose = resp.state.pose
+            # GetModelState returns pose directly (not state.pose)
+            pose = resp.pose
             x, y, z = pose.position.x, pose.position.y, pose.position.z
         except Exception:
             return
