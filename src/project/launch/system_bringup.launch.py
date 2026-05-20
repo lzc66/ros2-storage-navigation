@@ -1,8 +1,13 @@
-"""One-click bringup: Gazebo + Nav2 + Vision + Brain + Dynamic Obstacle."""
+"""One-click bringup: Gazebo AWS Warehouse + Linorobot2 Mecanum + Nav2 + Vision + Brain."""
 import os
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, SetEnvironmentVariable, TimerAction
+from launch.actions import (
+    ExecuteProcess, SetEnvironmentVariable, TimerAction, IncludeLaunchDescription,
+)
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.conditions import IfCondition
 from launch_ros.actions import Node, SetParameter
+from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -10,21 +15,28 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('project')
     aws_share = get_package_share_directory('aws_robomaker_small_warehouse_world')
 
+    # Force linorobot2 mecanum as the only hardware platform
+    os.environ['LINOROBOT2_BASE'] = 'mecanum'
+
+    # Model paths: project + AWS warehouse + linorobot2
     aws_model_path = os.path.join(aws_share, 'models')
     model_path = os.path.join(pkg_share, 'models')
     sys_model_path = os.path.expanduser('~/.gazebo/models')
-    tb3_model_path = '/opt/ros/humble/share/turtlebot3_gazebo/models'
-    env_model_path = os.environ.get('GAZEBO_MODEL_PATH', '')
+    lino_gazebo_share = get_package_share_directory('linorobot2_gazebo')
+    lino_desc_share = get_package_share_directory('linorobot2_description')
     full_model_path = (
-        f'{model_path}:{aws_model_path}:{sys_model_path}:{tb3_model_path}'
+        f'{model_path}:{aws_model_path}:{sys_model_path}:'
+        f'{os.path.join(lino_gazebo_share, "models")}'
     )
+    env_model_path = os.environ.get('GAZEBO_MODEL_PATH', '')
     if env_model_path:
         full_model_path += f':{env_model_path}'
 
     set_model_path = SetEnvironmentVariable('GAZEBO_MODEL_PATH', full_model_path)
     set_py_unbuf = SetEnvironmentVariable('PYTHONUNBUFFERED', '1')
+    set_robot_base = SetEnvironmentVariable('LINOROBOT2_BASE', 'mecanum')
 
-    # AWS RoboMaker Small Warehouse (no roof for better visibility)
+    # AWS RoboMaker Small Warehouse (no roof)
     world_file = os.path.join(aws_share, 'worlds', 'no_roof_small_warehouse',
                               'no_roof_small_warehouse.world')
     map_file = os.path.join(pkg_share, 'maps', 'map.yaml')
@@ -32,8 +44,7 @@ def generate_launch_description():
 
     use_sim_time = SetParameter(name='use_sim_time', value=True)
 
-    # === Stage 8: Dynamic World Injection ===
-    # Inject gazebo_ros_state plugin directly into the world XML
+    # Inject gazebo_ros_state plugin into world XML
     dyn_world = '/tmp/dynamic_world.world'
     with open(world_file, 'r') as f:
         world_xml = f.read()
@@ -44,37 +55,57 @@ def generate_launch_description():
     with open(dyn_world, 'w') as f:
         f.write(world_xml)
 
-    # Gazebo (no -s state plugin — injected into world XML instead)
+    # Gazebo server + client
     gzserver = ExecuteProcess(
         cmd=['gzserver', '--verbose', dyn_world,
              '-s', 'libgazebo_ros_init.so', '-s', 'libgazebo_ros_factory.so'],
-        output='screen'
+        output='screen',
     )
-
     gzclient = ExecuteProcess(
-        cmd=['gzclient'],
-        output='screen'
+        cmd=['gzclient'], output='screen',
     )
 
-    # Spawn waffle
-    tb3_sdf = '/opt/ros/humble/share/turtlebot3_gazebo/models/turtlebot3_waffle/model.sdf'
+    # --- Linorobot2 Mecanum: URDF via xacro ---
+    import xacro
+    urdf_file = os.path.join(lino_desc_share, 'urdf', 'robots', 'mecanum.urdf.xacro')
+    robot_desc = xacro.process_file(urdf_file).toprettyxml(indent='  ')
+
+    # Spawn linorobot2 mecanum via robot_description topic
     spawn_robot = Node(
         package='gazebo_ros', executable='spawn_entity.py',
-        arguments=['-file', tb3_sdf, '-entity', 'turtlebot3',
-                   '-x', '-2.0', '-y', '-0.5', '-z', '0.1', '-unpause'],
+        arguments=[
+            '-entity', 'linorobot2',
+            '-topic', 'robot_description',
+            '-x', '-2.0', '-y', '-0.5', '-z', '0.1', '-unpause',
+        ],
         output='screen',
     )
 
-    # Robot state publisher
-    urdf_path = '/opt/ros/humble/share/turtlebot3_gazebo/urdf/turtlebot3_waffle.urdf'
-    robot_desc = open(urdf_path, 'r').read()
+    # Robot state publisher with mecanum URDF
     robot_state_pub = Node(
         package='robot_state_publisher', executable='robot_state_publisher',
         parameters=[{'use_sim_time': True, 'robot_description': robot_desc}],
         output='screen',
     )
 
-    # Nav2 nodes
+    # --- ros2_control: controller spawners for mecanum + lift ---
+    joint_state_spawner = Node(
+        package='controller_manager', executable='spawner',
+        arguments=['joint_state_broadcaster', '--controller-manager', '/controller_manager'],
+        output='screen',
+    )
+    mecanum_spawner = Node(
+        package='controller_manager', executable='spawner',
+        arguments=['mecanum_controller', '--controller-manager', '/controller_manager'],
+        output='screen',
+    )
+    lift_spawner = Node(
+        package='controller_manager', executable='spawner',
+        arguments=['lift_controller', '--controller-manager', '/controller_manager'],
+        output='screen',
+    )
+
+    # --- Nav2 nodes ---
     map_server = Node(package='nav2_map_server', executable='map_server',
                       parameters=[nav2_params,
                                   {'use_sim_time': True, 'yaml_filename': map_file}],
@@ -86,7 +117,6 @@ def generate_launch_description():
                              parameters=[{'use_sim_time': True,
                                           'node_names': ['map_server', 'amcl'], 'autostart': True}],
                              output='screen')
-
     planner_server = Node(package='nav2_planner', executable='planner_server',
                           parameters=[nav2_params], output='screen')
     controller_server = Node(package='nav2_controller', executable='controller_server',
@@ -108,25 +138,24 @@ def generate_launch_description():
                                           'autostart': True}],
                              output='screen')
 
-    # Stage 3: Vision + Brain
+    # --- Vision + Brain ---
     vision_node = Node(package='project', executable='vision_node.py',
                        name='vision_node', output='screen')
     brain_node = Node(package='project', executable='brain_node.py',
                       name='brain_node', output='screen')
-
-    # Item spawner (from Stage 1)
     item_spawner = Node(package='project', executable='item_spawner.py',
                         name='item_spawner', output='screen')
-
-    # Stage 6: Dynamic obstacle (moving worker)
     dynamic_obstacle = Node(package='project', executable='dynamic_obstacle.py',
                             name='dynamic_obstacle', output='screen')
 
     return LaunchDescription([
-        use_sim_time, set_model_path, set_py_unbuf,
+        use_sim_time, set_model_path, set_py_unbuf, set_robot_base,
         gzserver, gzclient,
-        TimerAction(period=20.0, actions=[spawn_robot]),  # AWS world: 14 DAE models need loading time
-        TimerAction(period=5.0, actions=[robot_state_pub]),
+        TimerAction(period=20.0, actions=[spawn_robot]),
+        # robot_state_publisher must be up before controller_manager
+        TimerAction(period=1.0, actions=[robot_state_pub]),
+        TimerAction(period=3.0, actions=[joint_state_spawner]),
+        TimerAction(period=5.0, actions=[mecanum_spawner, lift_spawner]),
         TimerAction(period=8.0, actions=[
             map_server, amcl, lifecycle_mgr_loc,
             planner_server, controller_server, bt_navigator,
