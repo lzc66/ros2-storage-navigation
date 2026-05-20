@@ -8,6 +8,7 @@ Architecture:
   - Nav2 → Lift → Active Search → Approach → Grip → Retreat → Drop-off
   - Async gripper service client (/gripper/switch)
 """
+import asyncio
 import math
 import queue
 import time
@@ -39,14 +40,15 @@ SEARCH_ANGULAR_SPEED = 0.15   # rad/s — safe slow rotation (≤0.2)
 SEARCH_POLL_PERIOD   = 0.1     # s — search loop frequency
 HIGH_LIFT_Z          = 0.4     # m — above this, enforce speed limit
 
-# Campaign 5: Grasping sequence
-APPROACH_SPEED      = 0.05    # m/s — gentle forward creep to contact target
-APPROACH_DURATION   = 1.5     # s — creep duration
+# Campaign 5+6: Standoff kinematics
+STANDOFF_DIST        = 0.5     # m — observe target from this distance
+APPROACH_SPEED       = 0.1     # m/s — forward creep to cross standoff gap
+APPROACH_DURATION    = 5.5     # s — enough to cover STANDOFF_DIST + margin
 RETREAT_SPEED        = -0.1    # m/s — pull back after gripping
-RETREAT_DURATION    = 1.0     # s — retreat duration
+RETREAT_DURATION     = 1.0     # s — retreat duration
 DROP_LIFT_Z          = 0.05    # m — near-ground release height (anti-bounce)
 BACKAWAY_SPEED       = -0.15   # m/s — exit drop zone after release
-BACKAWAY_DURATION   = 1.5     # s — back away duration
+BACKAWAY_DURATION    = 1.5     # s — back away duration
 DROPOFF_WAIT         = 2.0     # s — settle time after lift lowers for drop
 
 # Drop zones (world coords)
@@ -61,6 +63,14 @@ def quat_to_yaw(q):
 def yaw_to_quat(yaw):
     """Convert yaw angle (rad) to quaternion (z, w only)."""
     return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
+
+
+def standoff_point(tx, ty, tyaw, dist=STANDOFF_DIST):
+    """Compute an observation point `dist` metres behind the target,
+    along the reverse of target_yaw, so the camera faces the target."""
+    ox = tx - dist * math.cos(tyaw)
+    oy = ty - dist * math.sin(tyaw)
+    return ox, oy
 
 
 # ================================================================
@@ -190,7 +200,8 @@ class BrainNode(Node):
             f'{request.target_z:.1f})  queue_size={self._task_queue.qsize()}'
         )
 
-        # Wait for task completion (non-blocking)
+        # Async wait: task completion event or cancel request
+        task['_done_event'] = asyncio.Event()
         result = FetchTask.Result()
         while rclpy.ok():
             if goal_handle.is_cancel_requested:
@@ -198,23 +209,23 @@ class BrainNode(Node):
                 result.message = 'Cancelled'
                 goal_handle.canceled()
                 return result
-            if goal_handle.is_active and not goal_handle.is_executing:
-                # Task completed externally
+            # Wait for _succeed_task or _fail_task to signal completion
+            try:
+                done, _ = await asyncio.wait(
+                    [asyncio.ensure_future(task['_done_event'].wait())],
+                    timeout=0.5,
+                )
+                if done:
+                    break
+            except Exception:
                 break
-            await self._sleep_async(0.5)
-
-        result.success = True
-        result.message = 'Fetch completed'
-        goal_handle.succeed()
+        result.success = task.get('_result_ok', False)
+        result.message = task.get('_result_msg', 'Unknown')
+        if result.success:
+            goal_handle.succeed()
+        else:
+            goal_handle.abort()
         return result
-
-    async def _sleep_async(self, seconds):
-        """Non-blocking sleep for async contexts."""
-        start = time.time()
-        while time.time() - start < seconds:
-            await self._yield()
-    async def _yield(self):
-        pass  # rclpy executor yields naturally
 
     # ============================================================
     # Queue processor (timer callback)
@@ -322,15 +333,21 @@ class BrainNode(Node):
     # Task execution pipeline
     # ============================================================
     def _execute_task(self, prio, seq, task):
-        """Stateful pipeline: NAVIGATE → LIFT → VISION_CONFIRM."""
+        """Pipeline: STANDOFF_NAV → LIFT → SEARCH → APPROACH → GRIP → RETREAT → DROP."""
         self._active_task = task
         handle = task.get('handle')
         restored = task.get('restored', False)
 
+        # Campaign 6: compute standoff observation point
+        tyaw = task.get('yaw', 0.0)
+        tx, ty = task['x'], task['y']
+        ox, oy = standoff_point(tx, ty, tyaw)
+
         tag = 'RESTORED' if restored else 'NEW'
         self.get_logger().info(
             f'[EXEC {tag}] P{prio} seq={seq} '
-            f'→ ({task["x"]:.1f},{task["y"]:.1f},{task["z"]:.1f})'
+            f'pick=({tx:.1f},{ty:.1f},{task["z"]:.1f}) yaw={tyaw:.2f} '
+            f'standoff=({ox:.1f},{oy:.1f})'
         )
 
         if handle:
@@ -340,7 +357,7 @@ class BrainNode(Node):
 
         self._nav_busy = True
         self._send_nav_goal(
-            task['x'], task['y'], task.get('yaw', 0.0),
+            ox, oy, tyaw,
             on_done=lambda ok: self._on_nav_done(ok, prio, seq, task),
         )
 
@@ -501,16 +518,26 @@ class BrainNode(Node):
     def _succeed_task(self, task):
         self._nav_busy = False
         self._active_task = None
+        task['_result_ok'] = True
+        task['_result_msg'] = 'Pick-and-place complete'
         handle = task.get('handle')
         if handle and handle.is_active:
             fb = FetchTask.Feedback()
             fb.current_state = 'DONE'
             handle.publish_feedback(fb)
+        # Signal the async execute callback
+        if task.get('_done_event'):
+            task['_done_event'].set()
         self.get_logger().info('[TASK] SUCCESS — full pick-and-place complete')
 
     def _fail_task(self, task, reason):
         self._nav_busy = False
         self._active_task = None
+        task['_result_ok'] = False
+        task['_result_msg'] = reason
+        # Signal the async execute callback
+        if task.get('_done_event'):
+            task['_done_event'].set()
         self.get_logger().error(f'[TASK] FAILED: {reason}')
 
     # ============================================================
@@ -579,7 +606,7 @@ class BrainNode(Node):
         self._start_drop_nav(task)
 
     def _start_drop_nav(self, task):
-        """Navigate to drop coordinates with cargo."""
+        """Navigate to drop coordinates with cargo, using standoff."""
         handle = task.get('handle')
         if handle:
             fb = FetchTask.Feedback()
@@ -589,8 +616,12 @@ class BrainNode(Node):
         gx = task.get('drop_x', task.get('x', 0.0))
         gy = task.get('drop_y', task.get('y', 0.0))
         gyaw = task.get('drop_yaw', 0.0)
-        self.get_logger().info(f'[DROP-NAV] → ({gx:.1f},{gy:.1f})')
-        self._send_nav_goal(gx, gy, gyaw, on_done=lambda ok: (
+        # Standoff for drop approach
+        dox, doy = standoff_point(gx, gy, gyaw)
+        self.get_logger().info(
+            f'[DROP-NAV] drop=({gx:.1f},{gy:.1f}) standoff=({dox:.1f},{doy:.1f})'
+        )
+        self._send_nav_goal(dox, doy, gyaw, on_done=lambda ok: (
             self._on_drop_nav_done(ok, task)
         ))
 
