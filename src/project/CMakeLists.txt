@@ -44,6 +44,7 @@ install(PROGRAMS
   scripts/sim_manager.py
   scripts/calibration_check.py
   scripts/task_emitter.py
+  scripts/stress_test_preemption.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -198,11 +198,18 @@ class BrainNode(Node):
     def _poll_queue(self):
         if self._nav_busy:
             return
-
-        if self._task_queue.empty():
+        if self._preempting:
+            # Waiting for cancel confirmation — do not dispatch
             return
 
+        if self._task_queue.empty():
+            # No tasks queued; clear active task
+            if self._active_task is None:
+                return
+
         # Peek at highest-priority task
+        if self._task_queue.empty():
+            return
         prio, seq, task = self._task_queue.get()
 
         # If we have an active task and the new one has higher priority
@@ -216,38 +223,76 @@ class BrainNode(Node):
                 self._preempt_current(active_prio, prio, seq, task)
                 return
             else:
-                # Re-enqueue and stay busy
+                # Re-enqueue
                 self._task_queue.put((prio, seq, task))
                 return
 
         self._execute_task(prio, seq, task)
 
     def _preempt_current(self, old_prio, new_prio, new_seq, new_task):
-        """Cancel active Nav2 goal and re-queue the interrupted task."""
+        """Initiate async cancel of active Nav2 goal.  Will NOT dispatch
+        the new task until the cancel is confirmed by Nav2."""
         self._preempting = True
 
-        # Re-queue interrupted task (restore at its original priority)
+        # Re-queue interrupted task
         if self._active_task:
             self._active_task['restored'] = True
             self._task_queue.put(
                 (old_prio, self._active_task.get('seq', 0), self._active_task)
             )
+        self._active_task = None
 
-        # Cancel Nav2 goal
+        # Store the preempting task for deferred dispatch
+        self._pending_preempt = (new_prio, new_seq, new_task)
+
         if self._goal_handle is not None:
             self.get_logger().info(
-                '[PREEMPT] Canceling current Nav2 goal...'
+                '[PREEMPT] Sent cancel request to Nav2, waiting for confirmation...'
             )
-            future = self._goal_handle.cancel_goal_async()
-            # Fire-and-forget; nav completion triggers via result callback
+            cancel_future = self._goal_handle.cancel_goal_async()
+            cancel_future.add_done_callback(self._cancel_done_cb)
+        else:
+            # No active goal — dispatch immediately
+            self.get_logger().info(
+                '[PREEMPT] No active Nav2 goal — dispatching immediately'
+            )
+            self._flush_preempt()
 
-        self._active_task = None
+    def _cancel_done_cb(self, future):
+        """Called when Nav2 has processed the cancel request."""
+        try:
+            result = future.result()
+            self.get_logger().info(
+                f'[PREEMPT] Nav2 confirmed cancellation. '
+                f'Releasing lock and executing P{self._pending_preempt[0]} task.'
+            )
+        except Exception as e:
+            self.get_logger().warn(
+                f'[PREEMPT] Cancel future resolved with error: {e}. '
+                'Proceeding anyway.'
+            )
+
+        # The old goal's _nav_result callback may also fire (status=CANCELED).
+        # That handler sets _goal_handle=None — safe to call after cancel_done.
+        self._flush_preempt()
+
+    def _flush_preempt(self):
+        """Release preemption lock and dispatch the pending high-priority task."""
+        if self._pending_preempt is None:
+            self.get_logger().error(
+                '[PREEMPT] _flush_preempt called but no pending task!'
+            )
+            self._preempting = False
+            return
+
+        new_prio, new_seq, new_task = self._pending_preempt
+        self._pending_preempt = None
         self._nav_busy = False
         self._preempting = False
+        self._goal_handle = None
 
-        # Immediately execute the higher-priority task
-        self._task_queue.put((new_prio, new_seq, new_task))
-        self._poll_queue()
+        # Dispatch the high-priority task directly
+        self._execute_task(new_prio, new_seq, new_task)
 
     # ============================================================
     # Task execution pipeline
@@ -293,10 +338,12 @@ class BrainNode(Node):
     def _nav_goal_response(self, future, on_done):
         self._goal_handle = future.result()
         if self._goal_handle is None:
-            self.get_logger().error('[NAV] Goal rejected by server')
+            self.get_logger().error(
+                '[NAV] Goal rejected by server! State machine broken.'
+            )
             self._nav_busy = False
-            if on_done:
-                on_done(False)
+            self._active_task = None
+            # Do not call on_done — it would chain into lift/vision for a dead goal
             return
         self._goal_handle.get_result_async().add_done_callback(
             lambda f: self._nav_result(f, on_done)
@@ -311,13 +358,21 @@ class BrainNode(Node):
             self.get_logger().info('[NAV] Goal reached')
             if on_done:
                 on_done(True)
+        elif status == 6:  # CANCELED
+            self.get_logger().info(
+                '[NAV] Previous goal was canceled (preemption confirmed)'
+            )
+            # Do NOT call on_done — the preempt path is handling dispatch
         else:
             self.get_logger().warn(f'[NAV] Failed (status={status})')
-            if on_done:
-                on_done(False)
+            if not self._preempting:
+                if on_done:
+                    on_done(False)
 
     def _on_nav_done(self, ok, prio, seq, task):
         """Navigation complete → lift to target Z."""
+        if self._preempting:
+            return  # preemption in flight — ignore old task completion
         if not ok:
             self._nav_busy = False
             self._active_task = None
