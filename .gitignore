@@ -1,0 +1,35 @@
+# ROS 2 build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.eggs/
+
+# IDEs
+.vscode/
+.idea/
+
+# Model binaries (large files)
+*.engine
+*.onnx
+*.pt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gazebo
+*.log
+/.gazebo/
+
+# External training packages
+src/ros2_21_tutorials/
+src/task3/
+
+# Temp
+/tmp/

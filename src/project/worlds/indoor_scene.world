@@ -1,0 +1,181 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <world name="indoor_scene">
+
+    <!-- Lighting -->
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>0.3 -0.3 -1</direction>
+      <attenuation>
+        <range>30</range>
+      </attenuation>
+    </light>
+
+    <!-- Ground plane -->
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <!-- ===== Walls: 10x10m room ===== -->
+    <!-- North wall (y = 5) -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 5 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>10.4 0.2 2.8</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <cast_shadows>false</cast_shadows>
+          <geometry>
+            <box>
+              <size>10.4 0.2 2.8</size>
+            </box>
+          </geometry>
+          <material>
+            <script>
+              <uri>model://grey_wall/materials/scripts</uri>
+              <uri>model://grey_wall/materials/textures</uri>
+              <name>vrc/grey_wall</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- South wall (y = -5) -->
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -5 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>10.4 0.2 2.8</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <cast_shadows>false</cast_shadows>
+          <geometry>
+            <box>
+              <size>10.4 0.2 2.8</size>
+            </box>
+          </geometry>
+          <material>
+            <script>
+              <uri>model://grey_wall/materials/scripts</uri>
+              <uri>model://grey_wall/materials/textures</uri>
+              <name>vrc/grey_wall</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- East wall (x = 5) -->
+    <model name="wall_east">
+      <static>true</static>
+      <pose>5 0 1.4 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>10.4 0.2 2.8</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <cast_shadows>false</cast_shadows>
+          <geometry>
+            <box>
+              <size>10.4 0.2 2.8</size>
+            </box>
+          </geometry>
+          <material>
+            <script>
+              <uri>model://grey_wall/materials/scripts</uri>
+              <uri>model://grey_wall/materials/textures</uri>
+              <name>vrc/grey_wall</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- West wall (x = -5) -->
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-5 0 1.4 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>10.4 0.2 2.8</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <cast_shadows>false</cast_shadows>
+          <geometry>
+            <box>
+              <size>10.4 0.2 2.8</size>
+            </box>
+          </geometry>
+          <material>
+            <script>
+              <uri>model://grey_wall/materials/scripts</uri>
+              <uri>model://grey_wall/materials/textures</uri>
+              <name>vrc/grey_wall</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ===== Indoor objects ===== -->
+    <!-- Table in center-right -->
+    <include>
+      <uri>model://cafe_table</uri>
+      <name>table_center</name>
+      <pose>2 1.5 0 0 0 0</pose>
+    </include>
+
+    <!-- Cabinet near north wall -->
+    <include>
+      <uri>model://cabinet</uri>
+      <name>cabinet_north</name>
+      <pose>-2 3 0 0 0 0</pose>
+    </include>
+
+    <!-- Bookshelf near west wall -->
+    <include>
+      <uri>model://bookshelf</uri>
+      <name>bookshelf_west</name>
+      <pose>-3 -2 0 0 0 1.5708</pose>
+    </include>
+
+    <!-- Physical properties -->
+    <physics type="ode">
+      <real_time_update_rate>1000</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+      <gravity>0 0 -9.81</gravity>
+    </physics>
+
+    <!-- GUI camera initial pose -->
+    <gui>
+      <camera name="user_camera">
+        <pose>8 -8 8 0 0.6 2.3</pose>
+        <view_controller>orbit</view_controller>
+      </camera>
+    </gui>
+
+  </world>
+</sdf>

@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Unified CLI for ROS 2 simulation lifecycle management."""
+import argparse
+import os
+import signal
+import subprocess
+import sys
+import time
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PKG_DIR = os.path.dirname(_SCRIPT_DIR)
+WS_DIR = os.path.dirname(os.path.dirname(PKG_DIR))
+SETUP_BASH = os.path.join(WS_DIR, 'install', 'setup.bash')
+
+
+_LAUNCH_PROC = None
+
+
+def _ros2(cmd: str, check=True, timeout=None, capture=False):
+    """Wrap a ROS 2 command with environment sourcing."""
+    full = f"source {SETUP_BASH} && {cmd}"
+    print(f'[EXEC] {cmd[:120]}...' if len(cmd) > 120 else f'[EXEC] {cmd}')
+    try:
+        return subprocess.run(full, shell=True, executable='/bin/bash', check=check,
+                              timeout=timeout, capture_output=capture, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f'[ERROR] Command failed (exit {e.returncode})')
+        if capture:
+            print(f'  stderr: {e.stderr[:300]}')
+        if check:
+            raise
+
+
+# ===================== build =====================
+def cmd_build(_args):
+    print('[INFO] Building project...')
+    _ros2('colcon build --packages-select project --symlink-install',
+          timeout=120)
+    print('[INFO] Build complete.')
+
+
+# ===================== start =====================
+def cmd_start(_args):
+    global _LAUNCH_PROC
+    print('[INFO] Launching system_bringup (GUI)...')
+
+    env = os.environ.copy()
+    env['DISPLAY'] = os.environ.get('DISPLAY', ':1')
+    env['PATH'] = '/usr/bin:' + env.get('PATH', '')
+    # Mesa software rendering optimization for headless GPU containers
+    env.setdefault('LIBGL_ALWAYS_SOFTWARE', '1')
+    env.setdefault('GALLIUM_DRIVER', 'llvmpipe')
+    env.setdefault('LP_NUM_THREADS', '4')
+    env.setdefault('vblank_mode', '0')
+    env.setdefault('mesa_glthread', 'true')
+    # CUDA compute (available even when GLX is broken)
+    env.setdefault('CUDA_VISIBLE_DEVICES', '0')
+    # Cross-platform model paths (AutoDL + WSL compatible)
+    _aws_wh_models = os.path.join(WS_DIR, 'src', 'aws-robomaker-small-warehouse-world', 'models')
+    _lino_models   = os.path.join(WS_DIR, 'src', 'linorobot2', 'linorobot2_description', 'models')
+    env['GAZEBO_MODEL_PATH'] = (
+        os.path.join(PKG_DIR, 'models') + ':' +
+        os.path.join(os.path.expanduser('~'), '.gazebo', 'models') + ':' +
+        '/opt/ros/humble/share/turtlebot3_gazebo/models' + ':' +
+        _aws_wh_models + ':' +
+        _lino_models
+    )
+    # DDS Discovery Server for cross-machine bridge
+    env.setdefault('ROS_DISCOVERY_SERVER', '127.0.0.1:11811')
+    env.setdefault('ROS_DOMAIN_ID', '30')
+    launch_cmd = (
+        f'source {SETUP_BASH} && '
+        f'ros2 launch project system_bringup.launch.py'
+    )
+
+    _LAUNCH_PROC = subprocess.Popen(
+        ['bash', '-c', launch_cmd],
+        env=env,
+        preexec_fn=os.setsid,
+    )
+    print(f'[INFO] Launch PID={_LAUNCH_PROC.pid} (group)')
+
+    # Auto-init after 40s
+    print('[INFO] Waiting 40s for system init, then sending /initialpose...')
+    for remaining in range(40, 0, -5):
+        time.sleep(5)
+        print(f'  ... {remaining}s')
+    try:
+        _ros2(
+            'ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped '
+            "'{header: {frame_id: \"map\"}, "
+            "pose: {pose: {position: {x: -2.0, y: -0.5, z: 0.0}, "
+            "orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}, "
+            "covariance: [0.25, 0.0, 0.0, 0.0, 0.0, 0.0, "
+            "0.0, 0.25, 0.0, 0.0, 0.0, 0.0, "
+            "0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "
+            "0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "
+            "0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "
+            "0.0, 0.0, 0.0, 0.0, 0.0, 0.06853891909122467]}}'",
+            timeout=10
+        )
+        print('[INFO] /initialpose sent.')
+    except Exception as e:
+        print(f'[WARNING] init pose failed: {e}')
+
+    print('[INFO] System running. Press Ctrl+C to stop.')
+    try:
+        while _LAUNCH_PROC.poll() is None:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print('\n[INFO] Caught SIGINT, shutting down launch group...')
+        if _LAUNCH_PROC is not None and _LAUNCH_PROC.poll() is None:
+            os.killpg(os.getpgid(_LAUNCH_PROC.pid), signal.SIGINT)
+            try:
+                _LAUNCH_PROC.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(_LAUNCH_PROC.pid), signal.SIGKILL)
+            print('[INFO] Launch group terminated.')
+    print('[INFO] Start command done.')
+
+
+# ===================== spawn =====================
+def cmd_spawn(args):
+    target = args.target
+    if target == 'red':
+        print('[INFO] Spawning RED box at (1.5, 0.0, 0.5)...')
+        _ros2(
+            'ros2 service call /spawn_item project/srv/SpawnItem '
+            '"{target_type: \'box\', x: 1.5, y: 0.0, z: 0.5}"',
+            timeout=10
+        )
+        print('[INFO] Red box spawned.')
+    elif target == 'blue':
+        print('[INFO] Spawning BLUE barrel at (0.0, 1.5, 0.5)...')
+        _ros2(
+            'ros2 service call /spawn_item project/srv/SpawnItem '
+            '"{target_type: \'barrel\', x: 0.0, y: 1.5, z: 0.5}"',
+            timeout=10
+        )
+        print('[INFO] Blue barrel spawned.')
+    elif target == 'clean':
+        name = args.name if args.name else 'red_box'
+        print(f'[INFO] Deleting entity [{name}]...')
+        _ros2(
+            f'ros2 service call /delete_entity gazebo_msgs/srv/DeleteEntity '
+            f'"{{name: \'{name}\'}}"',
+            timeout=10
+        )
+        print(f'[INFO] Entity [{name}] deleted.')
+    else:
+        print(f'[ERROR] Unknown target: {target}. Use red | blue | clean')
+
+
+# ===================== nuke =====================
+def cmd_nuke(_args):
+    print('[INFO] NUKING all simulation processes...')
+    for cmd in [
+        'killall -9 gzserver gzclient 2>/dev/null',
+        'pkill -9 -f "ros2 launch"',
+        'pkill -9 -f "python3.*_node"',
+    ]:
+        print(f'[EXEC] {cmd}')
+        subprocess.run(cmd, shell=True)
+    time.sleep(2)
+    print('[INFO] Nuke complete. All zombie processes eliminated.')
+
+
+# ===================== CLI =====================
+def main():
+    parser = argparse.ArgumentParser(
+        description='Simulation Manager - Unified CLI for ROS 2 lifecycle'
+    )
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    sub.add_parser('build', help='colcon build --packages-select project')
+    sub.add_parser('start', help='Launch system_bringup + auto init-pose')
+    spawn_p = sub.add_parser('spawn', help='Spawn red box / blue barrel / clean entity')
+    spawn_p.add_argument('target', choices=['red', 'blue', 'clean'],
+                         help='Target type to spawn or delete')
+    spawn_p.add_argument('--name', default='red_box',
+                         help='Entity name for clean (default: red_box)')
+    sub.add_parser('nuke', help='Kill all Gazebo and ROS 2 processes')
+
+    args = parser.parse_args()
+
+    cmds = {
+        'build': cmd_build,
+        'start': cmd_start,
+        'spawn': cmd_spawn,
+        'nuke': cmd_nuke,
+    }
+    try:
+        cmds[args.command](args)
+    except KeyboardInterrupt:
+        print('\n[INFO] Interrupted.')
+        if args.command == 'start' and _LAUNCH_PROC:
+            os.killpg(os.getpgid(_LAUNCH_PROC.pid), signal.SIGINT)
+
+
+if __name__ == '__main__':
+    main()

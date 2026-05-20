@@ -1,0 +1,292 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="mbot">
+
+    <!-- Base chassis -->
+    <link name="chassis">
+      <pose>0 0 0.15 0 0 0</pose>
+      <inertial>
+        <mass>5.0</mass>
+        <inertia>
+          <ixx>0.13</ixx>
+          <iyy>0.21</iyy>
+          <izz>0.21</izz>
+        </inertia>
+      </inertial>
+      <collision name="chassis_collision">
+        <geometry>
+          <box>
+            <size>0.5 0.35 0.15</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="chassis_visual">
+        <geometry>
+          <box>
+            <size>0.5 0.35 0.15</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.2 0.2 0.2 1</ambient>
+          <diffuse>0.3 0.3 0.3 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <!-- Left wheel -->
+    <link name="left_wheel">
+      <pose>0 0.22 0.05 0 0 0</pose>
+      <inertial>
+        <mass>0.2</mass>
+        <inertia>
+          <ixx>0.0005</ixx>
+          <iyy>0.0005</iyy>
+          <izz>0.0005</izz>
+        </inertia>
+      </inertial>
+      <collision name="left_wheel_collision">
+        <geometry>
+          <cylinder>
+            <radius>0.06</radius>
+            <length>0.04</length>
+          </cylinder>
+        </geometry>
+      </collision>
+      <visual name="left_wheel_visual">
+        <geometry>
+          <cylinder>
+            <radius>0.06</radius>
+            <length>0.04</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.1 0.1 0.1 1</ambient>
+          <diffuse>0.1 0.1 0.1 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="left_wheel_joint" type="revolute">
+      <parent>chassis</parent>
+      <child>left_wheel</child>
+      <axis>
+        <xyz>0 1 0</xyz>
+      </axis>
+      <limit>
+        <lower>-1e+16</lower>
+        <upper>1e+16</upper>
+      </limit>
+    </joint>
+
+    <!-- Right wheel -->
+    <link name="right_wheel">
+      <pose>0 -0.22 0.05 0 0 0</pose>
+      <inertial>
+        <mass>0.2</mass>
+        <inertia>
+          <ixx>0.0005</ixx>
+          <iyy>0.0005</iyy>
+          <izz>0.0005</izz>
+        </inertia>
+      </inertial>
+      <collision name="right_wheel_collision">
+        <geometry>
+          <cylinder>
+            <radius>0.06</radius>
+            <length>0.04</length>
+          </cylinder>
+        </geometry>
+      </collision>
+      <visual name="right_wheel_visual">
+        <geometry>
+          <cylinder>
+            <radius>0.06</radius>
+            <length>0.04</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.1 0.1 0.1 1</ambient>
+          <diffuse>0.1 0.1 0.1 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="right_wheel_joint" type="revolute">
+      <parent>chassis</parent>
+      <child>right_wheel</child>
+      <axis>
+        <xyz>0 1 0</xyz>
+      </axis>
+      <limit>
+        <lower>-1e+16</lower>
+        <upper>1e+16</upper>
+      </limit>
+    </joint>
+
+    <!-- Caster wheel for balance -->
+    <link name="caster_wheel">
+      <pose>0.15 0 -0.03 0 0 0</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.0001</ixx>
+          <iyy>0.0001</iyy>
+          <izz>0.0001</izz>
+        </inertia>
+      </inertial>
+      <collision name="caster_collision">
+        <geometry>
+          <sphere>
+            <radius>0.03</radius>
+          </sphere>
+        </geometry>
+      </collision>
+      <visual name="caster_visual">
+        <geometry>
+          <sphere>
+            <radius>0.03</radius>
+          </sphere>
+        </geometry>
+        <material>
+          <ambient>0.1 0.1 0.1 1</ambient>
+          <diffuse>0.1 0.1 0.1 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="caster_joint" type="ball">
+      <parent>chassis</parent>
+      <child>caster_wheel</child>
+    </joint>
+
+    <!-- Lidar sensor link -->
+    <link name="lidar_link">
+      <pose>0 0 0.22 0 0 0</pose>
+      <inertial>
+        <mass>0.01</mass>
+        <inertia>
+          <ixx>1e-6</ixx>
+          <iyy>1e-6</iyy>
+          <izz>1e-6</izz>
+        </inertia>
+      </inertial>
+      <visual name="lidar_visual">
+        <geometry>
+          <cylinder>
+            <radius>0.04</radius>
+            <length>0.04</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0 0 1 1</ambient>
+          <diffuse>0 0 1 1</diffuse>
+        </material>
+      </visual>
+      <sensor name="lidar_sensor" type="ray">
+        <pose>0 0 0.02 0 0 0</pose>
+        <ray>
+          <scan>
+            <horizontal>
+              <samples>360</samples>
+              <resolution>1</resolution>
+              <min_angle>-1.570796</min_angle>
+              <max_angle>1.570796</max_angle>
+            </horizontal>
+          </scan>
+          <range>
+            <min>0.12</min>
+            <max>10.0</max>
+            <resolution>0.01</resolution>
+          </range>
+        </ray>
+        <plugin name="lidar_plugin" filename="libgazebo_ros_ray_sensor.so">
+          <ros>
+            <namespace>/mbot</namespace>
+          </ros>
+          <update_rate>10</update_rate>
+          <output_type>sensor_msgs/LaserScan</output_type>
+          <frame_name>lidar_link</frame_name>
+          <topic_name>/scan</topic_name>
+        </plugin>
+      </sensor>
+    </link>
+
+    <joint name="lidar_joint" type="fixed">
+      <parent>chassis</parent>
+      <child>lidar_link</child>
+    </joint>
+
+    <!-- Camera sensor link -->
+    <link name="camera_link">
+      <pose>0.2 0 0.15 0 0.2 0</pose>
+      <inertial>
+        <mass>0.01</mass>
+        <inertia>
+          <ixx>1e-6</ixx>
+          <iyy>1e-6</iyy>
+          <izz>1e-6</izz>
+        </inertia>
+      </inertial>
+      <visual name="camera_visual">
+        <geometry>
+          <box>
+            <size>0.04 0.02 0.02</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+        </material>
+      </visual>
+      <sensor name="camera_sensor" type="camera">
+        <camera>
+          <horizontal_fov>1.047</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>100</far>
+          </clip>
+        </camera>
+        <plugin name="camera_plugin" filename="libgazebo_ros_camera.so">
+          <ros>
+            <namespace>/mbot</namespace>
+          </ros>
+          <update_rate>30</update_rate>
+          <frame_name>camera_link</frame_name>
+          <topic_name>/image_raw</topic_name>
+        </plugin>
+      </sensor>
+    </link>
+
+    <joint name="camera_joint" type="fixed">
+      <parent>chassis</parent>
+      <child>camera_link</child>
+    </joint>
+
+    <!-- Differential drive plugin -->
+    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <ros>
+        <namespace>/mbot</namespace>
+      </ros>
+      <update_rate>50</update_rate>
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>0.44</wheel_separation>
+      <wheel_diameter>0.12</wheel_diameter>
+      <max_wheel_torque>20</max_wheel_torque>
+      <max_wheel_acceleration>1.0</max_wheel_acceleration>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>chassis</robot_base_frame>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>true</publish_wheel_tf>
+      <odometry_topic>/odom</odometry_topic>
+      <command_topic>/cmd_vel</command_topic>
+    </plugin>
+
+  </model>
+</sdf>
