@@ -190,14 +190,20 @@ class VisionNode(Node):
         if depth is None or depth.size == 0:
             return
 
-        # Depth: Gazebo outputs float32 in metres, but 16UC1 (mm) is also common.
-        # Normalise to float32 metres.
-        if depth.dtype == np.uint16:
+        # Depth: use msg.encoding for unambiguous unit conversion
+        enc = depth_msg.encoding
+        if enc in ('32FC1', '32FC2'):
+            depth_m = depth.astype(np.float32)             # metres
+        elif enc in ('16UC1', '16UC2'):
+            depth_m = depth.astype(np.float32) / 1000.0   # millimetres → metres
+        elif enc == 'mono16':
+            # Ambiguous: Gazebo Classic rgbd_camera often uses mono16 in mm
             depth_m = depth.astype(np.float32) / 1000.0
-        elif depth.dtype == np.float32:
-            depth_m = depth
+        elif enc == 'mono8':
+            depth_m = depth.astype(np.float32) / 255.0    # normalised
         else:
-            depth_m = depth.astype(np.float32)
+            self.get_logger().error(f'Unknown depth encoding: {enc}')
+            return
 
         h_img, w_img = bgr.shape[:2]
 

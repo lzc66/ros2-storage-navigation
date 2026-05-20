@@ -45,9 +45,10 @@
       <xacro:insert_block name="origin" />
     </joint>
 
+    <!-- REP 103 optical frame: Z-forward (out of lens), X-right, Y-down -->
     <link name="camera_depth_link"/>
     <joint name="camera_depth_joint" type="fixed">
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin xyz="0 0 0" rpy="-1.570796 0 -1.570796"/>
       <parent link="camera_link"/>
       <child link="camera_depth_link"/>
     </joint>

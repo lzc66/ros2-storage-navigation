@@ -40,6 +40,7 @@ install(PROGRAMS
   scripts/brain_node.py
   scripts/dynamic_obstacle.py
   scripts/sim_manager.py
+  scripts/calibration_check.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
