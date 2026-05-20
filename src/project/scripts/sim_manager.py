@@ -14,6 +14,7 @@ SETUP_BASH = os.path.join(WS_DIR, 'install', 'setup.bash')
 
 
 _LAUNCH_PROC = None
+_DISCOVERY_PROC = None
 
 
 def _ros2(cmd: str, check=True, timeout=None, capture=False):
@@ -65,9 +66,16 @@ def cmd_start(_args):
         _aws_wh_models + ':' +
         _lino_models
     )
-    # DDS Discovery Server for cross-machine bridge
-    env.setdefault('ROS_DISCOVERY_SERVER', '127.0.0.1:11811')
-    env.setdefault('ROS_DOMAIN_ID', '30')
+    # DDS Discovery Server — start before ROS 2 launch
+    global _DISCOVERY_PROC
+    print('[INFO] Starting Fast-DDS Discovery Server (127.0.0.1:11811)...')
+    _DISCOVERY_PROC = subprocess.Popen(
+        ['fast-discovery-server', '-i', '0', '-l', '127.0.0.1', '-p', '11811'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    time.sleep(1.0)
+    env['ROS_DISCOVERY_SERVER'] = '127.0.0.1:11811'
+    env['ROS_DOMAIN_ID'] = '30'
     launch_cmd = (
         f'source {SETUP_BASH} && '
         f'ros2 launch project system_bringup.launch.py'
@@ -109,6 +117,10 @@ def cmd_start(_args):
             time.sleep(1)
     except KeyboardInterrupt:
         print('\n[INFO] Caught SIGINT, shutting down launch group...')
+        if _DISCOVERY_PROC is not None and _DISCOVERY_PROC.poll() is None:
+            _DISCOVERY_PROC.terminate()
+            _DISCOVERY_PROC.wait(timeout=5)
+            print('[INFO] Discovery server terminated.')
         if _LAUNCH_PROC is not None and _LAUNCH_PROC.poll() is None:
             os.killpg(os.getpgid(_LAUNCH_PROC.pid), signal.SIGINT)
             try:
@@ -154,6 +166,12 @@ def cmd_spawn(args):
 # ===================== nuke =====================
 def cmd_nuke(_args):
     print('[INFO] NUKING all simulation processes...')
+    global _DISCOVERY_PROC
+    if _DISCOVERY_PROC is not None and _DISCOVERY_PROC.poll() is None:
+        _DISCOVERY_PROC.terminate()
+        _DISCOVERY_PROC.wait(timeout=5)
+        print('[INFO] Discovery server terminated.')
+        _DISCOVERY_PROC = None
     for cmd in [
         'killall -9 gzserver gzclient 2>/dev/null',
         'pkill -9 -f "ros2 launch"',

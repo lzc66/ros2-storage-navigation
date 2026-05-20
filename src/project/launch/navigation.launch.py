@@ -152,7 +152,7 @@ def generate_launch_description():
         use_sim_time,
         set_model_path,
         gzserver, gzclient,
-        TimerAction(period=3.0, actions=[spawn_robot]),
+        TimerAction(period=20.0, actions=[spawn_robot]),  # AWS world: 14 DAE models need loading time
         TimerAction(period=5.0, actions=[robot_state_pub]),
         TimerAction(period=8.0, actions=[
             map_server, amcl, lifecycle_manager_localization,

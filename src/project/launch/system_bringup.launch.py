@@ -22,6 +22,7 @@ def generate_launch_description():
         full_model_path += f':{env_model_path}'
 
     set_model_path = SetEnvironmentVariable('GAZEBO_MODEL_PATH', full_model_path)
+    set_py_unbuf = SetEnvironmentVariable('PYTHONUNBUFFERED', '1')
 
     # AWS RoboMaker Small Warehouse (no roof for better visibility)
     world_file = os.path.join(aws_share, 'worlds', 'no_roof_small_warehouse',
@@ -122,9 +123,9 @@ def generate_launch_description():
                             name='dynamic_obstacle', output='screen')
 
     return LaunchDescription([
-        use_sim_time, set_model_path,
+        use_sim_time, set_model_path, set_py_unbuf,
         gzserver, gzclient,
-        TimerAction(period=3.0, actions=[spawn_robot]),
+        TimerAction(period=20.0, actions=[spawn_robot]),  # AWS world: 14 DAE models need loading time
         TimerAction(period=5.0, actions=[robot_state_pub]),
         TimerAction(period=8.0, actions=[
             map_server, amcl, lifecycle_mgr_loc,
