@@ -2,12 +2,9 @@
 import os
 from launch import LaunchDescription
 from launch.actions import (
-    ExecuteProcess, SetEnvironmentVariable, TimerAction, IncludeLaunchDescription,
+    ExecuteProcess, SetEnvironmentVariable, TimerAction,
 )
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.conditions import IfCondition
 from launch_ros.actions import Node, SetParameter
-from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -18,7 +15,7 @@ def generate_launch_description():
     # Force linorobot2 mecanum as the only hardware platform
     os.environ['LINOROBOT2_BASE'] = 'mecanum'
 
-    # Model paths: project + AWS warehouse + linorobot2
+    # Model paths
     aws_model_path = os.path.join(aws_share, 'models')
     model_path = os.path.join(pkg_share, 'models')
     sys_model_path = os.path.expanduser('~/.gazebo/models')
@@ -41,17 +38,15 @@ def generate_launch_description():
                               'no_roof_small_warehouse.world')
     map_file = os.path.join(pkg_share, 'maps', 'map.yaml')
     nav2_params = os.path.join(pkg_share, 'params', 'nav2_params.yaml')
-
     use_sim_time = SetParameter(name='use_sim_time', value=True)
 
-    # Inject gazebo_ros_state plugin into world XML
+    # World XML: inject gazebo_ros_state plugin
     dyn_world = '/tmp/dynamic_world.world'
     with open(world_file, 'r') as f:
         world_xml = f.read()
     world_xml = world_xml.replace(
         '</world>',
-        '  <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so"/>\n'
-        '</world>'
+        '  <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so"/>\n</world>'
     )
     with open(dyn_world, 'w') as f:
         f.write(world_xml)
@@ -66,26 +61,32 @@ def generate_launch_description():
         cmd=['gzclient'], output='screen',
     )
 
-    # --- Linorobot2 Mecanum: xacro → temp URDF → file spawn ---
-    import xacro
+    # --- Linorobot2 Mecanum: xacro → clean SDF → factory spawn ---
+    import xacro, re, subprocess as _sp
     urdf_file = os.path.join(lino_desc_share, 'urdf', 'robots', 'mecanum.urdf.xacro')
     robot_desc = xacro.process_file(urdf_file).toprettyxml(indent='  ')
-    robot_urdf_path = '/tmp/linorobot2_mecanum.urdf'
-    with open(robot_urdf_path, 'w') as f:
+    urdf_tmp = '/tmp/linorobot2_mecanum.urdf'
+    with open(urdf_tmp, 'w') as f:
         f.write(robot_desc)
+    sdf_text = _sp.run(['gz', 'sdf', '-p', urdf_tmp],
+                       check=True, timeout=30, capture_output=True, text=True).stdout
+    sdf_text = re.sub(r"\s+gz:[a-z_]+='[^']*'", '', sdf_text)
+    sdf_text = re.sub(r'\s+gz:[a-z_]+="[^"]*"', '', sdf_text)
+    sdf_tmp = '/tmp/linorobot2_mecanum.sdf'
+    with open(sdf_tmp, 'w') as f:
+        f.write(sdf_text)
 
-    # Spawn via URDF file + -param robot_description for ROS plugins
     spawn_robot = Node(
         package='gazebo_ros', executable='spawn_entity.py',
         arguments=[
             '-entity', 'linorobot2',
-            '-file', robot_urdf_path,
+            '-file', sdf_tmp,
             '-x', '-2.0', '-y', '-0.5', '-z', '0.1', '-unpause',
         ],
         output='screen',
     )
 
-    # Robot state publisher with mecanum URDF
+    # Robot state publisher (TF tree)
     robot_state_pub = Node(
         package='robot_state_publisher', executable='robot_state_publisher',
         parameters=[{'use_sim_time': True, 'robot_description': robot_desc}],
@@ -125,9 +126,13 @@ def generate_launch_description():
                                           'autostart': True}],
                              output='screen')
 
-    # --- Vision + Brain ---
+    # --- Vision + Brain (camera topics aligned with Gazebo Classic output) ---
     vision_node = Node(package='project', executable='vision_node.py',
-                       name='vision_node', output='screen')
+                       name='vision_node', output='screen',
+                       remappings=[
+                           ('/camera/color/image_raw', '/camera/image_raw'),
+                           ('/camera/color/camera_info', '/camera/camera_info'),
+                       ])
     brain_node = Node(package='project', executable='brain_node.py',
                       name='brain_node', output='screen')
     item_spawner = Node(package='project', executable='item_spawner.py',
@@ -138,10 +143,8 @@ def generate_launch_description():
     return LaunchDescription([
         use_sim_time, set_model_path, set_py_unbuf, set_robot_base,
         gzserver, gzclient,
-        # robot_state_publisher provides URDF for spawn_entity -topic
         TimerAction(period=1.0, actions=[robot_state_pub]),
-        TimerAction(period=20.0, actions=[spawn_robot]),
-        # Controller spawners AFTER robot spawn (gazebo_ros2_control creates /controller_manager)
+        TimerAction(period=25.0, actions=[spawn_robot]),  # AWS world loading time
         TimerAction(period=30.0, actions=[
             map_server, amcl, lifecycle_mgr_loc,
             planner_server, controller_server, bt_navigator,
