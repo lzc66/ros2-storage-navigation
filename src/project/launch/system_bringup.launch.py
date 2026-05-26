@@ -41,6 +41,11 @@ def generate_launch_description():
     nav2_params = os.path.join(pkg_share, 'params', 'nav2_params.yaml')
     # sim_time only for Gazebo nodes; Nav2 uses wall time (avoids /clock QoS mismatch)
     use_sim_time = SetParameter(name='use_sim_time', value=True)
+    # Force all nodes to subscribe /clock with BEST_EFFORT (Gazebo Classic QoS)
+    clock_qos = SetParameter(
+        name='qos_overrides./clock.subscription.reliability',
+        value='best_effort',
+    )
 
     # World XML: inject gazebo_ros_state plugin
     dyn_world = '/tmp/dynamic_world.world'
@@ -91,14 +96,14 @@ def generate_launch_description():
     # Robot state publisher (TF tree)
     robot_state_pub = Node(
         package='robot_state_publisher', executable='robot_state_publisher',
-        parameters=[{'use_sim_time': True, 'robot_description': robot_desc}],
+        parameters=[{'use_sim_time': False, 'robot_description': robot_desc}],
         output='screen',
     )
 
     # --- Nav2 nodes ---
     map_server = Node(package='nav2_map_server', executable='map_server',
                       parameters=[nav2_params,
-                                  {'use_sim_time': True, 'yaml_filename': map_file}],
+                                  {'use_sim_time': False, 'yaml_filename': map_file}],
                       output='screen')
     # Ground-truth localization: static map→odom identity (no AMCL needed)
     static_map_odom = Node(
@@ -108,7 +113,7 @@ def generate_launch_description():
     )
     lifecycle_mgr_loc = Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
                              name='lifecycle_manager_localization',
-                             parameters=[{'use_sim_time': True,
+                             parameters=[{'use_sim_time': False,
                                           'node_names': ['map_server'],
                                           'autostart': True,
                                           'bond_timeout': 10.0}],
@@ -127,7 +132,7 @@ def generate_launch_description():
                              parameters=[nav2_params], output='screen')
     lifecycle_mgr_nav = Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
                              name='lifecycle_manager_navigation',
-                             parameters=[{'use_sim_time': True,
+                             parameters=[{'use_sim_time': False,
                                           'node_names': ['planner_server', 'controller_server',
                                                          'bt_navigator', 'behavior_server',
                                                          'waypoint_follower', 'velocity_smoother'],
@@ -149,7 +154,7 @@ def generate_launch_description():
                             name='dynamic_obstacle', output='screen')
 
     return LaunchDescription([
-        use_sim_time, set_model_path, set_py_unbuf, set_robot_base,
+        use_sim_time, clock_qos, set_model_path, set_py_unbuf, set_robot_base,
         gzserver, gzclient,
         TimerAction(period=1.0, actions=[robot_state_pub]),
         TimerAction(period=25.0, actions=[spawn_robot]),
