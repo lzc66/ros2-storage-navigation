@@ -15,6 +15,7 @@ SETUP_BASH = os.path.join(WS_DIR, 'install', 'setup.bash')
 
 _LAUNCH_PROC = None
 _DISCOVERY_PROC = None
+_XVFB_PROC = None
 
 
 def _ros2(cmd: str, check=True, timeout=None, capture=False):
@@ -47,11 +48,22 @@ def cmd_build(_args):
 
 # ===================== start =====================
 def cmd_start(_args):
-    global _LAUNCH_PROC
+    global _LAUNCH_PROC, _XVFB_PROC
     print('[INFO] Launching system_bringup (GUI)...')
 
+    # --- Xvfb virtual display (headless GPU containers) ---
+    print('[INFO] Starting Xvfb on :99 (1024x768x24)...')
+    _XVFB_PROC = subprocess.Popen(
+        ['Xvfb', ':99', '-screen', '0', '1024x768x24', '-ac', '+extension', 'GLX'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    time.sleep(1.0)
+    if _XVFB_PROC.poll() is not None:
+        print('[ERROR] Xvfb failed to start. Camera sensors will be disabled.')
+
     env = os.environ.copy()
-    env['DISPLAY'] = os.environ.get('DISPLAY', ':1')
+    env['DISPLAY'] = ':99'          # virtual framebuffer
+    env['QT_X11_NO_MITSHM'] = '1'  # avoid MIT-SHM errors in containers
     env['PATH'] = '/usr/bin:' + env.get('PATH', '')
     # Mesa software rendering optimization for headless GPU containers
     env.setdefault('LIBGL_ALWAYS_SOFTWARE', '1')
@@ -122,6 +134,10 @@ def cmd_start(_args):
             time.sleep(1)
     except KeyboardInterrupt:
         print('\n[INFO] Caught SIGINT, shutting down launch group...')
+        if _XVFB_PROC is not None and _XVFB_PROC.poll() is None:
+            _XVFB_PROC.terminate()
+            _XVFB_PROC.wait(timeout=5)
+            print('[INFO] Xvfb terminated.')
         if _DISCOVERY_PROC is not None and _DISCOVERY_PROC.poll() is None:
             _DISCOVERY_PROC.terminate()
             _DISCOVERY_PROC.wait(timeout=5)
@@ -171,7 +187,12 @@ def cmd_spawn(args):
 # ===================== nuke =====================
 def cmd_nuke(_args):
     print('[INFO] NUKING all simulation processes...')
-    global _DISCOVERY_PROC
+    global _DISCOVERY_PROC, _XVFB_PROC
+    if _XVFB_PROC is not None and _XVFB_PROC.poll() is None:
+        _XVFB_PROC.terminate()
+        _XVFB_PROC.wait(timeout=5)
+        print('[INFO] Xvfb terminated.')
+        _XVFB_PROC = None
     if _DISCOVERY_PROC is not None and _DISCOVERY_PROC.poll() is None:
         _DISCOVERY_PROC.terminate()
         _DISCOVERY_PROC.wait(timeout=5)
