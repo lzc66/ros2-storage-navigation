@@ -104,7 +104,9 @@ def generate_launch_description():
     lifecycle_mgr_loc = Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
                              name='lifecycle_manager_localization',
                              parameters=[{'use_sim_time': True,
-                                          'node_names': ['map_server', 'amcl'], 'autostart': True}],
+                                          'node_names': ['map_server', 'amcl'],
+                                          'autostart': True,
+                                          'bond_timeout': 10.0}],
                              output='screen')
     planner_server = Node(package='nav2_planner', executable='planner_server',
                           parameters=[nav2_params], output='screen')
@@ -141,33 +143,21 @@ def generate_launch_description():
     dynamic_obstacle = Node(package='project', executable='dynamic_obstacle.py',
                             name='dynamic_obstacle', output='screen')
 
-    # Explicit lifecycle activation (lifecycle_manager may not reach nodes via DDS)
-    activate_map = ExecuteProcess(
-        cmd=['bash', '-c',
-             'ros2 lifecycle set /map_server configure && '
-             'ros2 lifecycle set /map_server activate'],
-        output='screen',
-    )
-    activate_amcl = ExecuteProcess(
-        cmd=['bash', '-c',
-             'ros2 lifecycle set /amcl configure && '
-             'ros2 lifecycle set /amcl activate'],
-        output='screen',
-    )
-
     return LaunchDescription([
         use_sim_time, set_model_path, set_py_unbuf, set_robot_base,
         gzserver, gzclient,
         TimerAction(period=1.0, actions=[robot_state_pub]),
         TimerAction(period=25.0, actions=[spawn_robot]),
+        # Nav2: lifecycle managers start AFTER managed nodes for service discovery
         TimerAction(period=30.0, actions=[
-            map_server, amcl, lifecycle_mgr_loc,
+            map_server, amcl,
+        ]),
+        TimerAction(period=32.0, actions=[lifecycle_mgr_loc]),
+        TimerAction(period=33.0, actions=[
             planner_server, controller_server, bt_navigator,
             behavior_server, waypoint_follower, velocity_smoother,
             lifecycle_mgr_nav,
         ]),
-        TimerAction(period=33.0, actions=[activate_map]),
-        TimerAction(period=35.0, actions=[activate_amcl]),
         TimerAction(period=37.0, actions=[vision_node, brain_node, item_spawner]),
         TimerAction(period=40.0, actions=[dynamic_obstacle]),
     ])
