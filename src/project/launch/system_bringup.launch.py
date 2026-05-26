@@ -36,7 +36,8 @@ def generate_launch_description():
     # AWS RoboMaker Small Warehouse (no roof)
     world_file = os.path.join(aws_share, 'worlds', 'no_roof_small_warehouse',
                               'no_roof_small_warehouse.world')
-    map_file = os.path.join(pkg_share, 'maps', 'map.yaml')
+    # AWS warehouse map (5cm resolution, aligned with no_roof_small_warehouse)
+    map_file = os.path.join(aws_share, 'maps', '005', 'map.yaml')
     nav2_params = os.path.join(pkg_share, 'params', 'nav2_params.yaml')
     use_sim_time = SetParameter(name='use_sim_time', value=True)
 
@@ -140,17 +141,33 @@ def generate_launch_description():
     dynamic_obstacle = Node(package='project', executable='dynamic_obstacle.py',
                             name='dynamic_obstacle', output='screen')
 
+    # Explicit lifecycle activation (lifecycle_manager may not reach nodes via DDS)
+    activate_map = ExecuteProcess(
+        cmd=['bash', '-c',
+             'ros2 lifecycle set /map_server configure && '
+             'ros2 lifecycle set /map_server activate'],
+        output='screen',
+    )
+    activate_amcl = ExecuteProcess(
+        cmd=['bash', '-c',
+             'ros2 lifecycle set /amcl configure && '
+             'ros2 lifecycle set /amcl activate'],
+        output='screen',
+    )
+
     return LaunchDescription([
         use_sim_time, set_model_path, set_py_unbuf, set_robot_base,
         gzserver, gzclient,
         TimerAction(period=1.0, actions=[robot_state_pub]),
-        TimerAction(period=25.0, actions=[spawn_robot]),  # AWS world loading time
+        TimerAction(period=25.0, actions=[spawn_robot]),
         TimerAction(period=30.0, actions=[
             map_server, amcl, lifecycle_mgr_loc,
             planner_server, controller_server, bt_navigator,
             behavior_server, waypoint_follower, velocity_smoother,
             lifecycle_mgr_nav,
         ]),
-        TimerAction(period=35.0, actions=[vision_node, brain_node, item_spawner]),
-        TimerAction(period=38.0, actions=[dynamic_obstacle]),
+        TimerAction(period=33.0, actions=[activate_map]),
+        TimerAction(period=35.0, actions=[activate_amcl]),
+        TimerAction(period=37.0, actions=[vision_node, brain_node, item_spawner]),
+        TimerAction(period=40.0, actions=[dynamic_obstacle]),
     ])

@@ -1,4 +1,4 @@
-image: map_rotated.png
+image: /root/autodl-tmp/ros2_ws/src/aws-robomaker-small-warehouse-world/maps/005/map.pgm
 resolution: 0.050000
 origin: [-7.000, -10.500000, 0.000000]
 negate: 0

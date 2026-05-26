@@ -106,10 +106,21 @@ def cmd_start(_args):
     print(f'[INFO] Launch PID={_LAUNCH_PROC.pid} (group)')
 
     # Auto-init after 40s
-    print('[INFO] Waiting 40s for system init, then sending /initialpose...')
+    print('[INFO] Waiting 40s for system init...')
     for remaining in range(40, 0, -5):
         time.sleep(5)
         print(f'  ... {remaining}s')
+
+    # Activate Nav2 lifecycle nodes (bypasses lifecycle_manager DDS issue)
+    print('[INFO] Activating map_server + amcl lifecycle...')
+    _ros2('ros2 lifecycle set /map_server configure', check=False, timeout=10)
+    _ros2('ros2 lifecycle set /map_server activate', check=False, timeout=10)
+    _ros2('ros2 lifecycle set /amcl configure', check=False, timeout=10)
+    _ros2('ros2 lifecycle set /amcl activate', check=False, timeout=10)
+    time.sleep(2)
+
+    # Send initialpose via /initialpose topic
+    print('[INFO] Sending /initialpose...')
     try:
         _ros2(
             'ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped '
