@@ -76,9 +76,9 @@ def cmd_start(_args):
     print('[INFO] Starting Fast-DDS Discovery Server (127.0.0.1:11811)...')
     _DISCOVERY_PROC = subprocess.Popen(
         ['fast-discovery-server', '-i', '0', '-l', '127.0.0.1', '-p', '11811'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=env, stdout=None, stderr=None,
     )
-    time.sleep(1.0)
+    time.sleep(2.0)
     env['ROS_DISCOVERY_SERVER'] = '127.0.0.1:11811'
     env['ROS_DOMAIN_ID'] = '30'
     launch_cmd = (
