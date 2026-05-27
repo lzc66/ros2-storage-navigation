@@ -1,6 +1,6 @@
 amcl:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     alpha1: 0.2
     alpha2: 0.2
     alpha3: 0.2
@@ -50,11 +50,11 @@ amcl:
 
 amcl_rclcpp_node:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
 
 bt_navigator:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     global_frame: map
     robot_base_frame: base_link
     transform_tolerance: 0.5
@@ -67,11 +67,11 @@ bt_navigator:
 
 bt_navigator_rclcpp_node:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
 
 controller_server:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
@@ -117,7 +117,7 @@ controller_server:
 
 controller_server_rclcpp_node:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
 
 local_costmap:
   local_costmap:
@@ -126,7 +126,7 @@ local_costmap:
       publish_frequency: 2.0
       global_frame: odom
       robot_base_frame: base_footprint
-      use_sim_time: false
+      use_sim_time: true
       rolling_window: true
       width: 3
       height: 3
@@ -154,7 +154,7 @@ local_costmap:
 
 local_costmap_rclcpp_node:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
 
 global_costmap:
   global_costmap:
@@ -163,7 +163,7 @@ global_costmap:
       publish_frequency: 0.5
       global_frame: map
       robot_base_frame: base_footprint
-      use_sim_time: false
+      use_sim_time: true
       robot_radius: 0.22
       resolution: 0.05
       track_unknown_space: true
@@ -189,20 +189,20 @@ global_costmap:
 
 global_costmap_rclcpp_node:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
 
 map_server:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
 
 map_saver:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     save_map_timeout: 5000
 
 planner_server:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     expected_planner_frequency: 1.0
     planner_plugins: ["GridBased"]
     GridBased:
@@ -213,11 +213,11 @@ planner_server:
 
 planner_server_rclcpp_node:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
 
 behavior_server:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     local_costmap_topic: local_costmap/costmap_raw
     global_costmap_topic: global_costmap/costmap_raw
     local_footprint_topic: local_costmap/published_footprint
@@ -237,11 +237,11 @@ behavior_server:
 
 behavior_server_rclcpp_node:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
 
 waypoint_follower:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     loop_rate: 20
     stop_on_failure: false
     waypoint_task_executor_plugin: "wait_at_waypoint"
@@ -252,11 +252,11 @@ waypoint_follower:
 
 waypoint_follower_rclcpp_node:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
 
 velocity_smoother:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
@@ -271,4 +271,4 @@ velocity_smoother:
 
 velocity_smoother_rclcpp_node:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
